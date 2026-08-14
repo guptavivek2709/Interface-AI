@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "runId": "member-not-found",
+  "createdAt": "2026-08-14T00:56:26.315Z",
+  "metadata": {
+    "scenario": "member-not-found",
+    "status": "business_outcome",
+    "artifactSha256": "f53a7746e58e366f0a6e1a4551c6f296d1d4ea61f8346812adb35774efe9eccd",
+    "sessionId": "[REDACTED]",
+    "plannerCallCount": 0
+  },
+  "evidence": [
+    {
+      "id": "e3369c85-2e4b-4668-88a6-c4452090e633",
+      "kind": "json",
+      "path": "data/result.json",
+      "mimeType": "application/json",
+      "sha256": "427d6beda4bb503c10292a3193ae2e9dfd8e5da3e5de9803e5813028621dc22b",
+      "bytes": 849,
+      "createdAt": "2026-08-14T00:56:26.315Z",
+      "redacted": true
+    }
+  ]
+}

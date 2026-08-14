@@ -1,0 +1,28 @@
+{
+  "status": "business_outcome",
+  "runId": "member-not-found",
+  "capabilityId": "prepare-sub-account-review",
+  "startedAt": "2026-08-14T00:56:18.140Z",
+  "completedAt": "2026-08-14T00:56:26.306Z",
+  "journal": [
+    {
+      "sequence": 1,
+      "stepId": "step.01.fill",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.fill.member-number.memberid",
+        "value": {
+          "kind": "input",
+          "name": "memberId"
+        }
+      },
+      "status": "succeeded",
+      "startedAt": "2026-08-14T00:56:18.181Z",
+      "completedAt": "2026-08-14T00:56:18.202Z",
+      "summary": "Attempt 1; Target target.fill.member-number.memberid value equals expected value: true.",
+      "evidencePaths": []
+    }
+  ],
+  "code": "MEMBER_NOT_FOUND",
+  "message": "The lookup completed successfully but no member record exists."
+}

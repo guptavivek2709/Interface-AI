@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "runId": "same-session-handoff",
+  "createdAt": "2026-08-14T00:56:45.461Z",
+  "metadata": {
+    "scenario": "same-session-handoff",
+    "status": "success",
+    "artifactSha256": "f53a7746e58e366f0a6e1a4551c6f296d1d4ea61f8346812adb35774efe9eccd",
+    "sessionId": "[REDACTED]",
+    "plannerCallCount": 0
+  },
+  "evidence": [
+    {
+      "id": "b66fbaf8-414c-4481-9e7e-44dfa7923891",
+      "kind": "screenshot",
+      "path": "screenshots/intervention-step.02.png",
+      "mimeType": "image/png",
+      "sha256": "1f8018bc94b18449439a9e7112c456938a7ace276e2c56ef59f7885ac38cc729",
+      "bytes": 54061,
+      "createdAt": "2026-08-14T00:56:44.752Z",
+      "masked": true
+    },
+    {
+      "id": "cb3ffcd2-7417-4fae-9365-d325499bd0d1",
+      "kind": "json",
+      "path": "data/result.json",
+      "mimeType": "application/json",
+      "sha256": "9b096d9fbcdf4265487295018742d8689faeb3116cd147b762cdc287ad4cb43d",
+      "bytes": 6222,
+      "createdAt": "2026-08-14T00:56:45.461Z",
+      "redacted": true
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlannerDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "reason",
+    "action",
+    "checkpointText",
+    "escalationReason"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["act", "finish", "escalate"]
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "action": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "targetRef",
+            "value",
+            "outputName",
+            "outputType",
+            "key"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["click", "fill", "select", "extract", "press"]
+            },
+            "targetRef": { "type": ["string", "null"] },
+            "value": {
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "name", "value"],
+                  "properties": {
+                    "kind": { "type": "string", "enum": ["input", "literal"] },
+                    "name": { "type": ["string", "null"] },
+                    "value": { "type": ["string", "number", "boolean", "null"] }
+                  }
+                }
+              ]
+            },
+            "outputName": { "type": ["string", "null"] },
+            "outputType": {
+              "anyOf": [
+                { "type": "null" },
+                { "type": "string", "enum": ["string", "money"] }
+              ]
+            },
+            "key": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "checkpointText": { "type": ["string", "null"] },
+    "escalationReason": { "type": ["string", "null"] }
+  }
+}

@@ -1,0 +1,896 @@
+{
+  "schemaVersion": "1.0",
+  "capability": {
+    "id": "prepare-sub-account-review",
+    "name": "Prepare sub-account review",
+    "description": "Looks up a synthetic member, prepares a sub-account, stops before creation, and returns the review summary.",
+    "version": "1.0.0",
+    "approval": "draft",
+    "tags": [
+      "banking",
+      "member-servicing",
+      "read-before-write"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-14T00:56:11.099Z",
+    "discoveryRunId": "discovery-codex",
+    "goal": "Look up member {{memberId}}, prepare a {{accountType}} sub-account named {{nickname}} with {{initialDeposit}}, stop at review, then extract exactly memberName (string), memberId (string), accountType (string), nickname (string), and initialDeposit (money), with no other output. Finish when those five outputs and the Review ready checkpoint are visible. Do not extract banner or status prose as an output.",
+    "planner": {
+      "provider": "openai-codex-cli",
+      "model": "gpt-5.6-terra"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web",
+    "vendorProduct": "legacy-bank-training",
+    "appVersion": "7.x",
+    "tenantVariant": "summit",
+    "entryPoint": "http://127.0.0.1:4317/?tenant=summit"
+  },
+  "inputs": [
+    {
+      "name": "memberId",
+      "description": "Caller-provided memberId parameter.",
+      "type": "string",
+      "required": true,
+      "classification": "restricted",
+      "pattern": "^[A-Z]+-[0-9]{4}$"
+    },
+    {
+      "name": "accountType",
+      "description": "Caller-provided accountType parameter.",
+      "type": "string",
+      "required": true,
+      "classification": "confidential"
+    },
+    {
+      "name": "nickname",
+      "description": "Caller-provided nickname parameter.",
+      "type": "string",
+      "required": true,
+      "classification": "confidential"
+    },
+    {
+      "name": "initialDeposit",
+      "description": "Caller-provided initialDeposit parameter.",
+      "type": "string",
+      "required": true,
+      "classification": "restricted"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "memberName",
+      "description": "Value extracted from the verified review checkpoint: memberName.",
+      "type": "string",
+      "classification": "restricted"
+    },
+    {
+      "name": "memberId",
+      "description": "Value extracted from the verified review checkpoint: memberId.",
+      "type": "string",
+      "classification": "restricted"
+    },
+    {
+      "name": "accountType",
+      "description": "Value extracted from the verified review checkpoint: accountType.",
+      "type": "string",
+      "classification": "confidential"
+    },
+    {
+      "name": "nickname",
+      "description": "Value extracted from the verified review checkpoint: nickname.",
+      "type": "string",
+      "classification": "confidential"
+    },
+    {
+      "name": "initialDeposit",
+      "description": "Value extracted from the verified review checkpoint: initialDeposit.",
+      "type": "money",
+      "classification": "restricted"
+    }
+  ],
+  "policy": {
+    "allowedOrigins": [
+      "http://127.0.0.1:4317"
+    ],
+    "allowedRoutes": [
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/index.html",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/workspace",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/workspace/search",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/workspace/member",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/workspace/sub-account/new",
+        "match": "exact"
+      },
+      {
+        "origin": "http://127.0.0.1:4317",
+        "path": "/workspace/sub-account/review",
+        "match": "exact"
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract",
+      "press"
+    ],
+    "deniedActions": [
+      "upload",
+      "download",
+      "execute",
+      "submit"
+    ],
+    "maxRisk": "medium"
+  },
+  "targets": [
+    {
+      "id": "trainingNoticeDismiss",
+      "description": "Dismiss the known synthetic training interstitial.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Dismiss training notice",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Dismiss training notice",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Accessible role/name is tenant-neutral; exact visible text is a deterministic fallback."
+    },
+    {
+      "id": "restoreTrainingSession",
+      "description": "Restore an expired synthetic training session during operator handoff.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Restore training session",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Restore training session",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "The explicit dialog action is safer than positional or generated-ID targeting."
+    },
+    {
+      "id": "target.fill.member-number.memberid",
+      "description": "Control named Member number used for fill.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "Member number",
+          "exact": true
+        },
+        {
+          "kind": "label",
+          "label": "Member number",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "memberNumber"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.click.search.button",
+      "description": "Control named Search used for click.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.click.open-sub-account.button",
+      "description": "Control named Open sub-account used for click.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Open sub-account",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Open sub-account",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.select.account-type.accounttype",
+      "description": "Control named Account type used for select.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Account type",
+          "exact": true
+        },
+        {
+          "kind": "label",
+          "label": "Account type",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "accountType"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.fill.nickname.nickname",
+      "description": "Control named Nickname used for fill.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "Nickname",
+          "exact": true
+        },
+        {
+          "kind": "label",
+          "label": "Nickname",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "nickname"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.fill.initial-deposit.initialdeposit",
+      "description": "Control named Initial deposit used for fill.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "Initial deposit",
+          "exact": true
+        },
+        {
+          "kind": "label",
+          "label": "Initial deposit",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "initialDeposit"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.click.review-sub-account.button",
+      "description": "Control named Review sub-account used for click.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Review sub-account",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Review sub-account",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.extract.member-name.membername",
+      "description": "Control named Member name used for extract.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "status",
+          "name": "Member name",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.extract.member-number.memberid",
+      "description": "Control named Member number used for extract.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "status",
+          "name": "Member number",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.extract.account-type.accounttype",
+      "description": "Control named Account type used for extract.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "status",
+          "name": "Account type",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.extract.nickname.nickname",
+      "description": "Control named Nickname used for extract.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "status",
+          "name": "Nickname",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    },
+    {
+      "id": "target.extract.initial-deposit.initialdeposit",
+      "description": "Control named Initial deposit used for extract.",
+      "framePath": [
+        {
+          "title": "Core banking workspace"
+        }
+      ],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "status",
+          "name": "Initial deposit",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "rationale": "Prefer exact accessibility role/name, then associated label, then semantic name attribute; every strategy must resolve to exactly one control and ambiguity fails closed."
+    }
+  ],
+  "steps": [
+    {
+      "id": "step.01.fill",
+      "title": "fill Member number",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.fill.member-number.memberid",
+        "value": {
+          "kind": "input",
+          "name": "memberId"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.fill.member-number.memberid",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.fill.member-number.memberid",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "memberId"
+        }
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.02.click",
+      "title": "click Search",
+      "action": {
+        "kind": "click",
+        "targetId": "target.click.search.button"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.click.search.button",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.click.open-sub-account.button",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.03.click",
+      "title": "click Open sub-account",
+      "action": {
+        "kind": "click",
+        "targetId": "target.click.open-sub-account.button"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.click.open-sub-account.button",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.select.account-type.accounttype",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.04.select",
+      "title": "select Account type",
+      "action": {
+        "kind": "select",
+        "targetId": "target.select.account-type.accounttype",
+        "value": {
+          "kind": "input",
+          "name": "accountType"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.select.account-type.accounttype",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.select.account-type.accounttype",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "accountType"
+        }
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.05.fill",
+      "title": "fill Nickname",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.fill.nickname.nickname",
+        "value": {
+          "kind": "input",
+          "name": "nickname"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.fill.nickname.nickname",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.fill.nickname.nickname",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "nickname"
+        }
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.06.fill",
+      "title": "fill Initial deposit",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.fill.initial-deposit.initialdeposit",
+        "value": {
+          "kind": "input",
+          "name": "initialDeposit"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.fill.initial-deposit.initialdeposit",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.fill.initial-deposit.initialdeposit",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "initialDeposit"
+        }
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.07.click",
+      "title": "click Review sub-account",
+      "action": {
+        "kind": "click",
+        "targetId": "target.click.review-sub-account.button"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.click.review-sub-account.button",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.member-name.membername",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 150
+      },
+      "risk": "reversible"
+    },
+    {
+      "id": "step.08.extract",
+      "title": "extract Member name",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.extract.member-name.membername",
+        "outputName": "memberName"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.extract.member-name.membername",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.member-name.membername",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "safe"
+    },
+    {
+      "id": "step.09.extract",
+      "title": "extract Member number",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.extract.member-number.memberid",
+        "outputName": "memberId"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.extract.member-number.memberid",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.member-number.memberid",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "safe"
+    },
+    {
+      "id": "step.10.extract",
+      "title": "extract Account type",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.extract.account-type.accounttype",
+        "outputName": "accountType"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.extract.account-type.accounttype",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.account-type.accounttype",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "safe"
+    },
+    {
+      "id": "step.11.extract",
+      "title": "extract Nickname",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.extract.nickname.nickname",
+        "outputName": "nickname"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.extract.nickname.nickname",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.nickname.nickname",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "safe"
+    },
+    {
+      "id": "step.12.extract",
+      "title": "extract Initial deposit",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.extract.initial-deposit.initialdeposit",
+        "outputName": "initialDeposit"
+      },
+      "preconditions": [
+        {
+          "kind": "target_visible",
+          "targetId": "target.extract.initial-deposit.initialdeposit",
+          "visible": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_visible",
+        "targetId": "target.extract.initial-deposit.initialdeposit",
+        "visible": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 150
+      },
+      "risk": "safe"
+    }
+  ],
+  "businessOutcomes": [
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "The lookup completed successfully but no member record exists.",
+      "condition": {
+        "kind": "text_visible",
+        "text": "No matching member",
+        "exact": true
+      }
+    }
+  ],
+  "recoveries": [
+    {
+      "code": "TRAINING_NOTICE",
+      "description": "Dismiss the known notice and continue the same deterministic step.",
+      "condition": {
+        "kind": "target_visible",
+        "targetId": "trainingNoticeDismiss",
+        "visible": true
+      },
+      "strategy": "dismiss",
+      "action": {
+        "kind": "click",
+        "targetId": "trainingNoticeDismiss"
+      },
+      "maxAttempts": 1
+    }
+  ],
+  "exceptions": [
+    {
+      "code": "PERMISSION_DENIED",
+      "description": "The operator lacks authorization to view the requested relationship.",
+      "condition": {
+        "kind": "text_visible",
+        "text": "Permission denied",
+        "exact": true
+      },
+      "disposition": "failure"
+    },
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "Pause and let a human restore the same live training session.",
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "text_visible",
+            "text": "Session expired",
+            "exact": true
+          },
+          {
+            "kind": "target_visible",
+            "targetId": "restoreTrainingSession",
+            "visible": true
+          }
+        ]
+      },
+      "disposition": "intervention"
+    }
+  ],
+  "checkpoint": {
+    "kind": "text_visible",
+    "text": "Review ready",
+    "exact": true
+  }
+}

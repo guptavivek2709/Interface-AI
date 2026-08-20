@@ -39,6 +39,8 @@ export interface SurfaceObservation {
   capturedAt: string;
   url: string;
   title: string;
+  /** Latest HTTP status observed for the main frame's document response. */
+  httpStatus: number | null;
   controls: ObservedControl[];
   frames: ObservedFrame[];
   visibleText: string;

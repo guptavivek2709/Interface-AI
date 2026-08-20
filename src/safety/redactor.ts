@@ -167,7 +167,10 @@ export class Redactor {
         value.length < 3
           ? `(?<![\\p{L}\\p{N}_])${escapeRegExp(value)}(?![\\p{L}\\p{N}_])`
           : escapeRegExp(value);
-      output = output.replace(new RegExp(expression, "gu"), () => this.replacement);
+      // Target systems commonly canonicalize operator IDs and other values to
+      // upper case before echoing them. Registered secrets therefore match
+      // Unicode case-insensitively as well as exactly.
+      output = output.replace(new RegExp(expression, "giu"), () => this.replacement);
     }
     for (const { pattern, replace } of CREDENTIAL_PATTERNS) {
       const replacer =

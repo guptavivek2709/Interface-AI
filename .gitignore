@@ -9,3 +9,7 @@ playwright-report/
 test-results/
 *.log
 evidence/generated/
+# Pre-hardening manual rehearsal captures are quarantined because their
+# manifests cover target footer identifiers produced before the new masks.
+evidence/ceo-rehearsal/
+.meridian/

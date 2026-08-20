@@ -585,7 +585,7 @@ export class ReplayRunner {
       reasonCode: code,
       reason: message,
       screenshotPath: screenshot?.path ?? "unavailable",
-      observedState: `Declared exception ${code} matched in sessionRef ${this.#options.surface.sessionRef}.`,
+      observedState: `Declared exception ${code} matched in the retained live session.`,
     };
     await this.#control.requestIntervention(context);
     const baseUrl = await this.#operator.start();
@@ -593,7 +593,9 @@ export class ReplayRunner {
       interventionId: this.#control.intervention?.interventionId,
       sessionId: this.#options.surface.sessionId,
       sessionRef: this.#options.surface.sessionRef,
-      operatorUrl: baseUrl,
+      // The access token lives only in the URL fragment returned to the
+      // authorized operator callback; evidence records the loopback origin.
+      operatorUrl: this.#operator.baseUrl,
     }, { actor: "system" });
     this.#options.onOperatorAvailable?.(baseUrl);
     if (this.#options.autoHandoff) await this.#options.autoHandoff(baseUrl);

@@ -411,7 +411,8 @@ export class DiscoveryRunner {
       interventionId: this.#control.intervention?.interventionId,
       sessionId: this.#options.surface.sessionId,
       sessionRef: this.#options.surface.sessionRef,
-      operatorUrl,
+      // Never persist the fragment-held handoff access token.
+      operatorUrl: this.#operator.baseUrl,
     }, { actor: "system" });
     this.#options.onOperatorAvailable?.(operatorUrl);
     if (this.#options.autoHandoff) await this.#options.autoHandoff(operatorUrl);

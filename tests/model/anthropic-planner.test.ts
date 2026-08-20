@@ -48,6 +48,7 @@ describe("AnthropicPlanner", () => {
         capturedAt: "2026-08-19T00:00:00.000Z",
         url: "http://127.0.0.1:4317/",
         title: "Synthetic bank",
+        httpStatus: 200,
         controls: [],
         frames: [],
         visibleText: "Review ready",

@@ -54,6 +54,7 @@ function discovery(goal: string, literal: string): DiscoverySuccess {
       capturedAt,
       url: "http://127.0.0.1:4317/",
       title: "Demo",
+      httpStatus: 200,
       controls: [],
       frames: [],
       visibleText: "Review ready",

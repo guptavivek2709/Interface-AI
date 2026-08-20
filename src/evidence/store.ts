@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { Redactor } from "../safety/redactor.js";
 
@@ -23,6 +23,8 @@ export interface EvidenceStoreOptions {
   runId?: string;
   redactor?: Redactor;
   now?: () => Date;
+  /** Injectable only for deterministic atomic-write failure tests. */
+  renameFile?: (source: string, destination: string) => Promise<void>;
 }
 
 export interface ScreenshotSaveOptions {
@@ -89,6 +91,22 @@ function portablePath(value: string): string {
 
 function sanitizeDom(html: string, redactor: Redactor): string {
   let output = redactor.redactString(html);
+  // A snapshot is diagnostic data, never executable content. Remove active
+  // elements and navigation/event attributes even though the API also serves
+  // HTML evidence as an inert text attachment.
+  output = output.replace(
+    /<\s*(script|iframe|object|embed)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/giu,
+    "<!-- active content removed -->",
+  );
+  output = output.replace(/<\s*(?:script|iframe|object|embed|base|link|meta)\b[^>]*\/?\s*>/giu, "");
+  output = output.replace(
+    /\s(?:on[a-z]+|srcdoc)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/giu,
+    "",
+  );
+  output = output.replace(
+    /(\s(?:href|src|action|formaction)\s*=\s*)(["'])([\s\S]*?)\2/giu,
+    (_match, prefix: string, quote: string) => `${prefix}${quote}#${quote}`,
+  );
   // Surface snapshots already replace these contents before serialization.
   // This defense-in-depth pass also protects externally supplied snapshots.
   output = output.replace(
@@ -123,6 +141,7 @@ export class EvidenceStore {
   readonly redactor: Redactor;
 
   private readonly now: () => Date;
+  private readonly renameFile: (source: string, destination: string) => Promise<void>;
   private readonly references: EvidenceRef[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
   private initialized = false;
@@ -134,6 +153,7 @@ export class EvidenceStore {
     assertInside(this.rootDirectory, this.runDirectory);
     this.redactor = options.redactor ?? new Redactor();
     this.now = options.now ?? (() => new Date());
+    this.renameFile = options.renameFile ?? rename;
   }
 
   static async create(options: EvidenceStoreOptions): Promise<EvidenceStore> {
@@ -235,6 +255,49 @@ export class EvidenceStore {
     }, false);
   }
 
+  /**
+   * Register a file that was written by a redacting evidence producer after it
+   * has been fully flushed and closed. The file is hashed at registration time
+   * and is then covered by the final manifest written afterwards.
+   */
+  async registerFinalizedFile(
+    relativePath: string,
+    kind: EvidenceKind,
+    mimeType: string,
+    flags: Pick<EvidenceRef, "masked" | "redacted">,
+  ): Promise<EvidenceRef> {
+    if (
+      !relativePath ||
+      relativePath.includes("\\") ||
+      relativePath.startsWith("/") ||
+      relativePath.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))
+    ) {
+      throw new TypeError("Finalized evidence path is invalid");
+    }
+    let result: EvidenceRef | undefined;
+    await this.enqueue(async () => {
+      const absolute = this.resolve(relativePath);
+      const payload = await readFile(absolute);
+      if (this.references.some((reference) => reference.path === portablePath(relativePath))) {
+        throw new TypeError("Finalized evidence file is already registered");
+      }
+      const createdAt = this.now();
+      if (!Number.isFinite(createdAt.getTime())) throw new TypeError("Clock returned an invalid date.");
+      result = {
+        id: randomUUID(),
+        kind,
+        path: portablePath(relativePath),
+        mimeType,
+        sha256: createHash("sha256").update(payload).digest("hex"),
+        bytes: payload.byteLength,
+        createdAt: createdAt.toISOString(),
+        ...flags,
+      };
+      this.references.push(result);
+    });
+    return result as EvidenceRef;
+  }
+
   async read(reference: EvidenceRef): Promise<Buffer> {
     return readFile(this.resolve(reference));
   }
@@ -302,10 +365,11 @@ export class EvidenceStore {
     assertInside(this.runDirectory, temporary);
     try {
       await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
-      await rename(temporary, destination);
+      await this.renameFile(temporary, destination);
     } catch (error) {
-      // The unpredictable temporary name can be safely left for forensic recovery
-      // if rename fails; callers receive the failure and no reference is recorded.
+      // Temporary files live inside the served run directory, so they must not
+      // remain available for accidental enumeration after a failed rename.
+      await unlink(temporary).catch(() => undefined);
       throw error;
     }
   }

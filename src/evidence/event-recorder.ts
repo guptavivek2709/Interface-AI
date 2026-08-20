@@ -104,8 +104,20 @@ export class EventRecorder {
 
   static async create(options: EventRecorderOptions): Promise<EventRecorder> {
     const recorder = new EventRecorder(options);
-    await recorder.initialize();
-    return recorder;
+    try {
+      await recorder.initialize();
+      return recorder;
+    } catch (error) {
+      try {
+        await recorder.close();
+      } catch (closeError) {
+        throw new AggregateError(
+          [error, closeError],
+          "EventRecorder initialization and cleanup failed.",
+        );
+      }
+      throw error;
+    }
   }
 
   async initialize(): Promise<void> {
@@ -164,12 +176,23 @@ export class EventRecorder {
     if (this.closed) return;
     this.closing = true;
     await this.queue;
+    let closeError: unknown;
     if (this.handle !== undefined) {
-      await this.handle.sync();
-      await this.handle.close();
+      const handle = this.handle;
       this.handle = undefined;
+      try {
+        await handle.sync();
+      } catch (error) {
+        closeError = error;
+      }
+      try {
+        await handle.close();
+      } catch (error) {
+        closeError ??= error;
+      }
     }
     this.closed = true;
+    if (closeError !== undefined) throw closeError;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {

@@ -28,6 +28,10 @@ export interface PlaywrightSurfaceOptions {
   assertNavigationAllowed?: (url: string, kind: "direct" | "redirect" | "popup" | "frame") => void;
   /** Evaluated for every HTTP(S) request, not only navigations. */
   assertResourceAllowed?: (url: string) => void;
+  /** Trusted adapter selectors for legacy regions containing synthetic PII/financial data. */
+  sensitiveSelectors?: readonly string[];
+  /** Mutates a detached URL only for observations/evidence; never for navigation. */
+  redactObservedUrl?: (url: URL) => void;
 }
 
 type LocatorRoot = Frame | Page;
@@ -47,11 +51,17 @@ function normalizeText(input: string | null | undefined): string {
   return (input ?? "").replace(/\s+/g, " ").trim();
 }
 
-function sanitizeUrl(raw: string): string {
+function sanitizeUrl(raw: string, redact?: (url: URL) => void): string {
   try {
     const url = new URL(raw);
     url.username = "";
     url.password = "";
+    url.hash = "";
+    try {
+      redact?.(url);
+    } catch {
+      return url.origin;
+    }
     return url.toString();
   } catch {
     return raw;
@@ -66,6 +76,8 @@ export class PlaywrightSurface {
   #browser: Browser | null = null;
   #context: BrowserContext | null = null;
   #page: Page | null = null;
+  #mainDocumentHttpStatus: number | null = null;
+  #mainDocumentMethod: "GET" | "POST" | null = null;
   #observationSequence = 0;
 
   constructor(options: PlaywrightSurfaceOptions) {
@@ -86,9 +98,21 @@ export class PlaywrightSurface {
     return this.#context;
   }
 
+  /** Latest main-frame document response status; subframes and assets are ignored. */
+  get lastMainDocumentStatus(): number | null {
+    return this.#mainDocumentHttpStatus;
+  }
+
+  /** Method of the latest main-frame document request. */
+  get lastMainDocumentMethod(): "GET" | "POST" | null {
+    return this.#mainDocumentMethod;
+  }
+
   async start(entrypoint: string): Promise<void> {
     await mkdir(this.#options.observationDirectory, { recursive: true });
     this.#options.assertNavigationAllowed?.(entrypoint, "direct");
+    this.#mainDocumentHttpStatus = null;
+    this.#mainDocumentMethod = null;
     this.#browser = await chromium.launch({ headless: this.#options.headless });
     this.#context = await this.#browser.newContext({
       viewport: { width: 1365, height: 900 },
@@ -123,6 +147,20 @@ export class PlaywrightSurface {
     });
     this.#page = await this.#context.newPage();
     this.#page.setDefaultTimeout(this.#options.timeoutMs);
+    this.#page.on("response", (response) => {
+      const request = response.request();
+      if (!request.isNavigationRequest() || request.resourceType() !== "document") return;
+      try {
+        if (request.frame() === this.#page?.mainFrame()) {
+          this.#mainDocumentHttpStatus = response.status();
+          const method = request.method().toUpperCase();
+          this.#mainDocumentMethod = method === "GET" || method === "POST" ? method : null;
+        }
+      } catch {
+        // A response can arrive as its frame detaches. It cannot describe the
+        // currently active main document, so retain the last known main status.
+      }
+    });
     this.#page.on("framenavigated", (frame) => this.#options.onNavigation?.(frame.url()));
     this.#page.on("popup", (popup) => {
       const url = popup.url();
@@ -154,6 +192,8 @@ export class PlaywrightSurface {
     this.#page = null;
     this.#context = null;
     this.#browser = null;
+    this.#mainDocumentHttpStatus = null;
+    this.#mainDocumentMethod = null;
   }
 
   async waitUntilReady(timeoutMs = this.#options.timeoutMs): Promise<void> {
@@ -195,7 +235,7 @@ export class PlaywrightSurface {
       }
       frames.push({
         framePath,
-        url: sanitizeUrl(frame.url()),
+        url: sanitizeUrl(frame.url(), this.#options.redactObservedUrl),
         title,
         headings,
         visibleText: visibleText.slice(0, 4_000),
@@ -229,7 +269,8 @@ export class PlaywrightSurface {
       caret: "hide",
     });
     const canonical = JSON.stringify({
-      url: sanitizeUrl(this.page.url()),
+      url: sanitizeUrl(this.page.url(), this.#options.redactObservedUrl),
+      httpStatus: this.#mainDocumentHttpStatus,
       frames: frames.map(({ framePath, url, headings, visibleText }) => ({
         framePath,
         url,
@@ -240,8 +281,9 @@ export class PlaywrightSurface {
     });
     return {
       capturedAt: new Date().toISOString(),
-      url: sanitizeUrl(this.page.url()),
+      url: sanitizeUrl(this.page.url(), this.#options.redactObservedUrl),
       title: await this.page.title(),
+      httpStatus: this.#mainDocumentHttpStatus,
       controls,
       frames,
       visibleText: frames.map((frame) => frame.visibleText).join("\n").slice(0, 10_000),
@@ -272,9 +314,25 @@ export class PlaywrightSurface {
       case "fill":
         await locator.fill(String(value ?? ""));
         break;
-      case "select":
-        await locator.selectOption({ label: String(value ?? "") });
+      case "select": {
+        const exactValue = String(value ?? "");
+        const options = await locator.locator("option").evaluateAll((elements) =>
+          elements.map((element) => ({
+            value: (element as HTMLOptionElement).value,
+            label: (element as HTMLOptionElement).label,
+          })),
+        );
+        const labelMatches = options.filter((option) => option.label === exactValue);
+        const valueMatches = options.filter((option) => option.value === exactValue);
+        if (labelMatches.length === 1) await locator.selectOption({ label: exactValue });
+        else if (valueMatches.length === 1) await locator.selectOption({ value: exactValue });
+        else {
+          throw new Error(
+            `Select value ${JSON.stringify(exactValue)} did not match exactly one option`,
+          );
+        }
         break;
+      }
       case "extract":
         observedValue = normalizeText(await locator.innerText().catch(async () => locator.inputValue()));
         break;
@@ -325,8 +383,22 @@ export class PlaywrightSurface {
       const label = framePath.map((segment) => segment.title).join(" > ") || "top";
       const html = await frame
         .locator("html")
-        .evaluate((root) => {
+        .evaluate((root, configuredSelectors) => {
           const clone = root.cloneNode(true) as HTMLElement;
+          for (const active of clone.querySelectorAll(
+            "script,iframe,object,embed,base,link[rel='stylesheet'],meta[http-equiv]",
+          )) {
+            active.remove();
+          }
+          for (const element of clone.querySelectorAll("*")) {
+            for (const attribute of [...element.attributes]) {
+              const name = attribute.name.toLowerCase();
+              if (name.startsWith("on") || name === "srcdoc") element.removeAttribute(attribute.name);
+              else if (["href", "src", "action", "formaction"].includes(name)) {
+                element.setAttribute(attribute.name, "#");
+              }
+            }
+          }
           const redact = (element: Element) => {
             if (element instanceof HTMLInputElement) {
               element.value = "[REDACTED]";
@@ -340,15 +412,22 @@ export class PlaywrightSurface {
               element.textContent = "[REDACTED]";
             }
           };
-          for (const element of clone.querySelectorAll(
-            'input:not([type="hidden"]),textarea,select,[contenteditable="true"],[data-sensitive],output',
-          )) {
+          const selectors = [
+            'input:not([type="hidden"])',
+            "textarea",
+            "select",
+            '[contenteditable="true"]',
+            "[data-sensitive]",
+            "output",
+            ...configuredSelectors,
+          ];
+          for (const element of clone.querySelectorAll(selectors.join(","))) {
             redact(element);
           }
           return `<!doctype html>\n${clone.outerHTML}`;
-        })
+        }, this.#options.sensitiveSelectors ?? [])
         .catch(() => "<!-- detached frame -->");
-      documents.push(`<!-- frame: ${label}; url: ${sanitizeUrl(frame.url())} -->\n${html}`);
+      documents.push(`<!-- frame: ${label}; url: ${sanitizeUrl(frame.url(), this.#options.redactObservedUrl)} -->\n${html}`);
     }
     return documents.join("\n\n");
   }
@@ -376,7 +455,11 @@ export class PlaywrightSurface {
       }
       const text = (html.innerText || html.textContent || "").replace(/\s+/g, " ").trim() || null;
       const placeholder = input.placeholder?.trim() || null;
-      const name = explicitAria || labelledText || label || text || placeholder || input.name || tag;
+      const inputType = tag === "input" ? input.type.toLowerCase() : "";
+      const isInputButton = ["submit", "button", "reset", "image"].includes(inputType);
+      const buttonValue = isInputButton ? input.value.trim() || null : null;
+      const name =
+        explicitAria || labelledText || label || buttonValue || text || placeholder || input.name || tag;
       let role = html.getAttribute("role") || "generic";
       if (!html.hasAttribute("role")) {
         if (tag === "button") role = "button";
@@ -385,8 +468,9 @@ export class PlaywrightSurface {
         else if (tag === "textarea") role = "textbox";
         else if (tag === "output") role = "status";
         else if (tag === "input") {
-          if (input.type === "checkbox") role = "checkbox";
-          else if (input.type === "radio") role = "radio";
+          if (isInputButton) role = "button";
+          else if (inputType === "checkbox") role = "checkbox";
+          else if (inputType === "radio") role = "radio";
           else role = "textbox";
         }
       }
@@ -397,7 +481,12 @@ export class PlaywrightSurface {
         label,
         nameAttribute: html.getAttribute("name"),
         text,
-        value: "value" in input ? String(input.value ?? "") : text,
+        value:
+          tag === "input" && inputType === "password"
+            ? null
+            : "value" in input
+              ? String(input.value ?? "")
+              : text,
         disabled:
           ("disabled" in input && Boolean(input.disabled)) || html.getAttribute("aria-disabled") === "true",
       };
@@ -415,7 +504,7 @@ export class PlaywrightSurface {
           (await element.getAttribute("aria-label")) ??
           (await element.getAttribute("name")) ??
           "unnamed frame",
-        url: sanitizeUrl(cursor.url()),
+        url: sanitizeUrl(cursor.url(), this.#options.redactObservedUrl),
       });
       cursor = cursor.parentFrame();
     }
@@ -485,6 +574,7 @@ export class PlaywrightSurface {
           'input:not([type="hidden"]),textarea,select,[contenteditable="true"],[data-sensitive],output,[autocomplete*="password" i],[autocomplete*="token" i]',
         ),
       );
+      for (const selector of this.#options.sensitiveSelectors ?? []) masks.push(frame.locator(selector));
     }
     return masks;
   }

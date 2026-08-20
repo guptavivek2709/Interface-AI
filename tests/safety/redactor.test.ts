@@ -61,4 +61,12 @@ describe("Redactor", () => {
     expect(output).toContain("port=43170");
     expect(output).toContain("Automation remains observable");
   });
+
+  it("masks target-system case canonicalization of registered secret values", () => {
+    const redactor = new Redactor({ sensitiveValues: ["teller1", "MixedCaseSecret"] });
+    const output = redactor.redactString("OPR TELLER1 / mixedcasesecret / MIXEDCASESECRET");
+    expect(output).not.toContain("TELLER1");
+    expect(output.toLocaleLowerCase("en-US")).not.toContain("mixedcasesecret");
+    expect(output.match(/\[REDACTED\]/gu)).toHaveLength(3);
+  });
 });

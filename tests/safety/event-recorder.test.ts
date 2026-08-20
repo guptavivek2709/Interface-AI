@@ -1,13 +1,14 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventRecorder, type RecordedEvent } from "../../src/evidence/event-recorder.js";
 import { Redactor } from "../../src/safety/redactor.js";
 
 const cleanup: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(cleanup.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
 
@@ -65,5 +66,19 @@ describe("EventRecorder", () => {
     expect(lines).toHaveLength(2);
     expect(lines.map((line) => JSON.parse(line))).toHaveLength(2);
   });
-});
 
+  it("closes an opened event stream when recorder initialization fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "event-recorder-failed-start-"));
+    cleanup.push(directory);
+    const filePath = join(directory, "events.jsonl");
+    const close = vi.spyOn(EventRecorder.prototype, "close");
+
+    await expect(EventRecorder.create({
+      filePath,
+      now: () => new Date(Number.NaN),
+    })).rejects.toThrow(/invalid date/u);
+
+    expect(close).toHaveBeenCalledTimes(1);
+    await expect(rm(filePath)).resolves.toBeUndefined();
+  });
+});

@@ -1,5 +1,16 @@
 export * from "./domain/index.js";
+export * from "./catalog/index.js";
+export * from "./capabilities/index.js";
+export * from "./runs/index.js";
+export * from "./execution/index.js";
+export * from "./api/index.js";
+export * from "./approval/index.js";
+export * from "./chat/index.js";
+export * from "./sessions/index.js";
+export * from "./profiles/index.js";
 export * from "./discovery/artifactCompiler.js";
 export * from "./discovery/discoveryRunner.js";
 export * from "./replay/replayRunner.js";
+export * from "./replay/replayRunnerV2.js";
+export * from "./surface/replayRuntimeV2.js";
 export { PolicyEngine, PolicyViolationError, Redactor } from "./safety/index.js";

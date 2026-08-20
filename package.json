@@ -1,40 +1,54 @@
 {
-  "name": "legacy-ui-capability-engine",
+  "name": "meridian-capability-console",
   "version": "1.0.0",
   "private": true,
-  "description": "LLM discovery to typed capability artifacts with deterministic, model-free UI replay.",
+  "description": "Anthropic-assisted operator console for guarded, deterministic MERIDIAN UI capabilities.",
   "type": "module",
   "engines": {
     "node": ">=22.12 <27"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.build.json",
+    "build:web": "vite build",
     "check": "npm run typecheck && npm run test && npm run build",
     "demo": "tsx src/demo/standalone.ts",
+    "dev:api": "tsx watch src/api/standalone.ts",
+    "dev:web": "vite",
     "discover": "tsx src/cli.ts discover",
     "replay": "tsx src/cli.ts replay",
     "evidence": "tsx scripts/generate-evidence.ts",
     "inspect": "tsx src/cli.ts inspect",
-    "start": "node dist/cli.js",
+    "serve": "tsx src/api/standalone.ts",
+    "smoke:meridian:read": "tsx scripts/smoke-meridian-readonly.ts",
+    "start": "node dist/api/standalone.js",
     "test": "vitest run",
     "test:e2e": "vitest run tests/e2e",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit",
     "browser:install": "playwright install chromium"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.120.0",
+    "@fastify/static": "10.1.3",
     "commander": "15.0.0",
+    "fastify": "5.12.1",
     "openai": "7.4.0",
     "playwright": "1.62.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/pngjs": "6.0.5",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.0",
     "pngjs": "7.0.0",
     "tsx": "4.23.12",
     "typescript": "7.0.2",
+    "vite": "8.2.2",
     "vitest": "4.1.10"
   }
 }

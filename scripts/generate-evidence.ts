@@ -19,11 +19,12 @@ import { JsonArtifactStore } from "../src/storage/jsonStore.js";
 import { PlaywrightSurface } from "../src/surface/playwright/playwrightSurface.js";
 import { startDemoServer } from "../src/demo/index.js";
 
-type DiscoveryProvider = "offline" | "codex" | "openai";
+type DiscoveryProvider = "offline" | "anthropic" | "codex" | "openai";
 
 interface CliOptions {
   provider: DiscoveryProvider;
   port: string;
+  replaceCheckedEvidence: boolean;
 }
 
 interface JsonEvent extends Omit<RecordedEvent, "data"> {
@@ -210,6 +211,10 @@ async function plannerFor(provider: DiscoveryProvider): Promise<Planner> {
       const { CodexPlanner } = await import("../src/model/codexPlanner.js");
       return new CodexPlanner({ timeoutMs: 600_000 });
     }
+    case "anthropic": {
+      const { AnthropicPlanner } = await import("../src/model/anthropicPlanner.js");
+      return new AnthropicPlanner();
+    }
     case "openai": {
       const { OpenAIPlanner } = await import("../src/model/openaiPlanner.js");
       return new OpenAIPlanner();
@@ -220,6 +225,7 @@ async function plannerFor(provider: DiscoveryProvider): Promise<Planner> {
 async function discoverArtifact(
   provider: DiscoveryProvider,
   baseUrl: string,
+  planner: Planner,
 ): Promise<{
   artifact: CapabilityArtifact;
   artifactRef: FileRef;
@@ -234,7 +240,6 @@ async function discoverArtifact(
   redactor.registerMany(Object.values(DISCOVERY_INPUTS));
   const profile = createLegacyBankProfile(baseUrl);
   const policy = new PolicyEngine(profile.policy);
-  const planner = await plannerFor(provider);
   const recorder = await EventRecorder.create({
     filePath: logPath,
     runId,
@@ -546,25 +551,39 @@ async function main(): Promise<void> {
     .description("Generate discovery provenance and five deterministic replay evidence runs.")
     .option(
       "--provider <provider>",
-      "discovery provider: offline (explicit test double), codex, or openai",
+      "discovery provider: offline (explicit test double), anthropic, codex, or openai",
       process.env["EVIDENCE_DISCOVERY_PROVIDER"] ?? "codex",
     )
     .option("--port <port>", "fixed local demo port", process.env["EVIDENCE_DEMO_PORT"] ?? "4317");
+  program.option(
+    "--replace-checked-evidence",
+    "acknowledge replacement of evidence/artifact.json, discovery, runs, and index.json",
+    false,
+  );
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
-  if (!["offline", "codex", "openai"].includes(options.provider)) {
+  if (!["offline", "anthropic", "codex", "openai"].includes(options.provider)) {
     throw new Error(`Unsupported provider ${JSON.stringify(options.provider)}`);
   }
   const port = Number(options.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`--port must be an integer from 1 through 65535; received ${options.port}`);
   }
+  if (!options.replaceCheckedEvidence) {
+    throw new Error(
+      "Refusing to replace the reviewed evidence bundle without --replace-checked-evidence",
+    );
+  }
 
-  await cleanGeneratedBundle();
+  // Validate local provider configuration and bind the port before deleting
+  // any reviewed evidence. A later live-model failure can still leave a
+  // partial bundle, but only after the caller explicitly acknowledged it.
+  const planner = await plannerFor(options.provider);
   const demo = await startDemoServer({ host: "127.0.0.1", port });
   try {
+    await cleanGeneratedBundle();
     process.stdout.write(`Discovery (${options.provider}) against ${demo.baseUrl}\n`);
-    const discovered = await discoverArtifact(options.provider, demo.baseUrl);
+    const discovered = await discoverArtifact(options.provider, demo.baseUrl, planner);
     const replays: Record<string, unknown>[] = [];
     for (const scenario of SCENARIOS) {
       process.stdout.write(`Replay ${scenario.id}\n`);
@@ -582,7 +601,7 @@ async function main(): Promise<void> {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       generator: {
-        command: `npm run evidence -- --provider ${options.provider}`,
+        command: `npm run evidence -- --provider ${options.provider} --replace-checked-evidence`,
         demoOrigin: demo.baseUrl,
       },
       discovery: {

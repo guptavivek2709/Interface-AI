@@ -20,3 +20,21 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run check
+
+  windows-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - shell: pwsh
+        run: npm.cmd ci
+      - shell: pwsh
+        run: npm.cmd run typecheck
+      - shell: pwsh
+        run: npm.cmd test -- --run tests/cli/inputs.test.ts tests/model/anthropic-planner.test.ts tests/integration/replay-model-boundary.test.ts
+      - shell: cmd
+        run: npm.cmd run inspect -- --artifact "evidence/artifact.json"

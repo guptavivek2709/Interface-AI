@@ -165,7 +165,7 @@ describe("checked-in evidence bundle", () => {
     expect(discovery.genuineModel).toBe(true);
     expect(discovery.testDouble).toBe(false);
     expect(discovery.provenanceClass).toBe("genuine-llm");
-    expect(["openai-codex-cli", "openai-responses"]).toContain(discovery.provider);
+    expect(["openai-codex-cli", "openai-responses", "anthropic-messages"]).toContain(discovery.provider);
     expect(discovery.model).not.toBe("none");
   });
 

@@ -14,6 +14,7 @@
     "discover": "tsx src/cli.ts discover",
     "replay": "tsx src/cli.ts replay",
     "evidence": "tsx scripts/generate-evidence.ts",
+    "inspect": "tsx src/cli.ts inspect",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:e2e": "vitest run tests/e2e",
@@ -22,6 +23,7 @@
     "browser:install": "playwright install chromium"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.120.0",
     "commander": "15.0.0",
     "openai": "7.4.0",
     "playwright": "1.62.1",

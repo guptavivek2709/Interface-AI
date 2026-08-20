@@ -48,9 +48,15 @@ describe("deterministic replay import boundary", () => {
 
     expect(portableFiles.some((item) => item.includes("/src/model/"))).toBe(false);
     expect([...graph.externalModules]).not.toContain("openai");
+    expect([...graph.externalModules]).not.toContain("@anthropic-ai/sdk");
 
     const replaySource = await readFile(entry, "utf8");
     expect(replaySource).not.toMatch(/from\s+["']\.\.\/model\//u);
     expect(replaySource).not.toMatch(/import\s*\(\s*["']\.\.\/model\//u);
+
+    const cliPath = path.resolve("src/cli.ts");
+    const cliSource = await readFile(cliPath, "utf8");
+    const cliRuntimeModules = runtimeImports(cliSource, cliPath);
+    expect(cliRuntimeModules.some((item) => item.includes("/model/"))).toBe(false);
   });
 });

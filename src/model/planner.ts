@@ -87,21 +87,82 @@ export interface Planner {
   decide(request: PlannerRequest): Promise<PlannerResponse>;
 }
 
+interface InputSubstitution {
+  variant: string;
+  placeholder: string;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function inputSubstitutions(inputs: PlannerRequest["inputs"]): InputSubstitution[] {
+  const substitutions = new Map<string, string>();
+  for (const [name, value] of Object.entries(inputs)) {
+    const text = String(value);
+    const variants = new Set([text]);
+    try {
+      variants.add(encodeURIComponent(text));
+      variants.add(new URLSearchParams([["value", text]]).toString().slice("value=".length));
+    } catch {
+      // The raw form is still symbolized if an input contains an unpaired surrogate.
+    }
+    for (const variant of variants) {
+      if (variant && !substitutions.has(variant)) substitutions.set(variant, `{{${name}}}`);
+    }
+  }
+  return [...substitutions]
+    .map(([variant, placeholder]) => ({ variant, placeholder }))
+    .sort((left, right) => right.variant.length - left.variant.length);
+}
+
+function symbolize(value: string, substitutions: readonly InputSubstitution[]): string;
+function symbolize(value: string | null, substitutions: readonly InputSubstitution[]): string | null;
+function symbolize(
+  value: string | null,
+  substitutions: readonly InputSubstitution[],
+): string | null {
+  if (value === null) return null;
+  let result = value;
+  for (const { variant, placeholder } of substitutions) {
+    if (variant.length < 3) {
+      result = result.replace(
+        new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(variant)}(?![\\p{L}\\p{N}_])`, "gu"),
+        () => placeholder,
+      );
+    } else {
+      result = result.replaceAll(variant, () => placeholder);
+    }
+  }
+  return result;
+}
+
 export function plannerPrompt(request: PlannerRequest): string {
+  const substitutions = inputSubstitutions(request.inputs);
+  const inputs = Object.entries(request.inputs).map(([name, value]) => ({
+    name,
+    type: typeof value,
+  }));
   const controls = request.observation.controls.map((control) => ({
     ref: control.ref,
-    frame: control.framePath.map((frame) => frame.title),
+    frame: control.framePath.map((frame) => symbolize(frame.title, substitutions)),
     role: control.role,
-    name: control.name,
-    label: control.label,
-    value: control.value,
+    name: symbolize(control.name, substitutions),
+    label: symbolize(control.label, substitutions),
+    value: symbolize(control.value, substitutions),
     disabled: control.disabled,
   }));
   const frames = request.observation.frames.map((frame) => ({
-    frame: frame.framePath.map((item) => item.title),
-    url: frame.url,
-    headings: frame.headings,
-    visibleText: frame.visibleText.slice(0, 1_500),
+    frame: frame.framePath.map((item) => symbolize(item.title, substitutions)),
+    url: symbolize(frame.url, substitutions),
+    headings: frame.headings.map((heading) => symbolize(heading, substitutions)),
+    visibleText: symbolize(frame.visibleText.slice(0, 1_500), substitutions),
+  }));
+  const history = request.history.map((entry) => ({
+    ...entry,
+    targetName: symbolize(entry.targetName, substitutions),
+    outputName: symbolize(entry.outputName, substitutions),
+    result: symbolize(entry.result, substitutions),
   }));
 
   return [
@@ -115,9 +176,9 @@ export function plannerPrompt(request: PlannerRequest): string {
     "Choose finish only after the visible goal checkpoint is reached and requested outputs were extracted.",
     "Choose escalate when safe progress is impossible. Keep reason concise and never repeat sensitive values.",
     `Step ${request.currentStep} of at most ${request.maxSteps}.`,
-    `GOAL: ${request.goal}`,
-    `INPUTS: ${JSON.stringify(request.inputs)}`,
-    `HISTORY: ${JSON.stringify(request.history)}`,
+    `GOAL: ${symbolize(request.goal, substitutions)}`,
+    `INPUTS (values withheld; use names symbolically): ${JSON.stringify(inputs)}`,
+    `HISTORY: ${JSON.stringify(history)}`,
     `FRAMES: ${JSON.stringify(frames)}`,
     `CONTROLS: ${JSON.stringify(controls)}`,
   ].join("\n\n");

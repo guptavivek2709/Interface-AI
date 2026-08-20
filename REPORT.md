@@ -2,9 +2,9 @@
 
 This TypeScript/Node.js vertical slice keeps explicit boundaries in one process. A local server supplies an intentionally hostile banking surface: generated IDs, a nested iframe, table layouts, tenant-dependent field order, and injected runtime states. `PlaywrightSurface` turns it into a screenshot plus compact accessibility observation and executes clicks, fills, selections, reads, and key presses. This is a real UI path, not an application API.
 
-Discovery is a bounded observe-decide-act loop. Each model call returns one Zod-validated decision using a current control reference. Step and wall-clock limits bound the loop, unchanged-state detection catches repetition, policy gates every action, and completion requires a visible checkpoint. OpenAI Responses and authenticated Codex CLI planners share one interface; the scripted planner is explicitly a test double. The journal records decisions and observed controls, not a raw transcript.
+Discovery is a bounded observe-decide-act loop. Each model call returns one Zod-validated decision using a current control reference. Step and wall-clock limits bound the loop, unchanged-state detection catches repetition, policy gates every action, and completion requires a visible checkpoint. Anthropic Messages, OpenAI Responses, and authenticated Codex CLI planners share one interface; the scripted planner is explicitly a test double. The journal records decisions and observed controls, not a raw transcript.
 
-The compiler turns a successful journal into a parameterized capability. A separate replay runner validates and executes that artifact without importing a planner or permitting model recovery. Discovery pays UI-reasoning cost once; production execution is cheap, reviewable, and predictable. A single process makes policy, session ownership, and evidence invariants easy to audit; services and queues would add failure modes without strengthening this proof.
+The compiler turns a successful journal into a parameterized capability. A separate replay runner validates and executes that artifact without importing a planner or permitting model recovery. A single process makes policy, session ownership, and evidence invariants easy to audit; services and queues would add failure modes without strengthening this proof.
 
 ## Artifact schema
 
@@ -12,7 +12,7 @@ The strict JSON artifact is versioned (`schemaVersion: "1.0"`). Capability metad
 
 Inputs and outputs are named, typed, documented, and classified. Inputs may declare an enum or ECMAScript pattern. Actions use a `ValueExpr`: either a reviewed literal or a symbolic caller-input reference, so discovery values do not become constants. The CLI also rejects persistence if serialized artifact text contains a supplied discovery value.
 
-Targets are reusable records with frame path, ordered semantic strategies, exact-one cardinality, and rationale. Steps reference targets and declare action, preconditions, postcondition, timeout, retry policy, and risk. The artifact separately declares its final checkpoint, business outcomes, bounded recoveries, and exceptions with failure or intervention dispositions. Graph validation rejects unknown fields, duplicate IDs, malformed regexes, and dangling target/input/output references. The result is both an agent-facing invocation contract and a human-reviewable plan.
+Targets are reusable records with frame path, ordered semantic strategies, exact-one cardinality, and rationale. Steps reference targets and declare action, preconditions, postcondition, timeout, retry policy, and risk. The artifact separately declares its final checkpoint, business outcomes, bounded recoveries, and exceptions with failure or intervention dispositions. Graph validation rejects unknown fields, duplicate IDs, malformed regexes, and dangling target/input/output references.
 
 ## Determinism & error handling
 
@@ -40,7 +40,7 @@ The loopback operator surface uses the same `BrowserContext`, page, cookies, and
 
 Policy checks exact origins and anchored document routes for direct navigation, frames, redirects, and popups; encoded traversal and credential-bearing URLs are rejected. Every HTTP(S) resource and WebSocket is exact-origin gated, service workers are disabled, and downloads are canceled. Action allowlists have explicit denials, contextual risk must stay below policy maximum, and replay blocks all irreversible steps. This capability stops at review and never creates an account.
 
-The redactor registers classified inputs before recording, recursively removes sensitive keys and common credential/token forms, and covers every JSONL event. Artifacts retain symbolic inputs. Screenshots mask inputs and marked outputs; DOM evidence removes live values. Evidence uses safe paths, SHA-256 metadata, and restrictive creation modes.
+The redactor registers classified inputs before recording, recursively removes sensitive keys and common credential/token forms, and covers every JSONL event. Planner prompts replace known raw and URL-encoded invocation values with symbolic input references before provider calls, and artifacts retain symbolic inputs. Screenshots mask inputs and marked outputs; DOM evidence removes live values. Evidence uses safe paths, SHA-256 metadata, and restrictive creation modes.
 
 These controls are not encryption or authorization, and selector masking can miss an incorrectly marked field. Genuine discovery sends synthetic screenshots to the chosen provider. Real deployment needs approved model boundaries, minimized observations, authenticated operator access, encrypted tenant-scoped evidence, retention controls, and signed audits. A write capability also needs an expiring approval bound to tenant, artifact digest, step, and invocation digest.
 

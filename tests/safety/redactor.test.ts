@@ -25,6 +25,7 @@ describe("Redactor", () => {
     const redactor = new Redactor({ sensitiveValues: [CANARY] });
     const input = [
       `Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.signature123`,
+      `ANTHROPIC_API_KEY=sk-ant-api03-SYNTHETIC_CANARY_1234567890`,
       `api_key=abcdef123456`,
       `https://alice:password@example.test/`,
       Buffer.from(CANARY, "utf8").toString("base64"),
@@ -35,6 +36,7 @@ describe("Redactor", () => {
     const output = redactor.redactString(input);
     expect(output).not.toContain(CANARY);
     expect(output).not.toContain("abcdef123456");
+    expect(output).not.toContain("sk-ant-api03");
     expect(output).not.toContain("password@example");
     expect(output).not.toContain("eyJhbGci");
     expect(output).not.toContain("Rainy+Day");

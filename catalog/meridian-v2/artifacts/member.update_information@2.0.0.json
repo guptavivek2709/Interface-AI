@@ -1,0 +1,1529 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "member.update_information",
+    "name": "Update member information",
+    "description": "Update member contact fields with input validation and an approval-bound direct save.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "write",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T06:01:00.055Z",
+    "goal": "From authenticated MAIN MENU, click Main Menu, open Member Inquiry, select Member Number mode, fill {{member_number}}, submit Search, select the exact member, extract the current labeled values as outputs email_before, phone_before, and address_before using those exact names, open Update Member Information, fill Email from {{email}}, Phone from {{phone}}, and Mailing Address from {{address}}, then finish on the update form with the three filled values visible. Do not click Save or cross the persistent-write boundary.",
+    "discoveryRunId": "discovery.671c6565-12a1-4b5f-98a0-8a58a47db16d",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "member_number",
+      "description": "Six-digit MERIDIAN member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number",
+        "minLength": 6,
+        "maxLength": 6,
+        "pattern": "^[0-9]{6}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "email",
+      "description": "Updated member email",
+      "type": {
+        "kind": "string",
+        "format": "email",
+        "maxLength": 254
+      },
+      "required": true,
+      "classification": "confidential"
+    },
+    {
+      "name": "phone",
+      "description": "Updated member phone",
+      "type": {
+        "kind": "string",
+        "format": "phone",
+        "pattern": "^[0-9()+ .-]{7,24}$"
+      },
+      "required": true,
+      "classification": "confidential"
+    },
+    {
+      "name": "address",
+      "description": "Updated mailing address",
+      "type": {
+        "kind": "string",
+        "minLength": 5,
+        "maxLength": 160
+      },
+      "required": true,
+      "classification": "restricted"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "email_before",
+      "description": "Email captured before the update",
+      "type": {
+        "kind": "string",
+        "format": "email"
+      },
+      "classification": "confidential"
+    },
+    {
+      "name": "phone_before",
+      "description": "Phone captured before the update",
+      "type": {
+        "kind": "string",
+        "format": "phone"
+      },
+      "classification": "confidential"
+    },
+    {
+      "name": "address_before",
+      "description": "Address captured before the update",
+      "type": {
+        "kind": "string"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "email",
+      "description": "Saved email",
+      "type": {
+        "kind": "string",
+        "format": "email"
+      },
+      "classification": "confidential"
+    },
+    {
+      "name": "phone",
+      "description": "Saved phone",
+      "type": {
+        "kind": "string",
+        "format": "phone"
+      },
+      "classification": "confidential"
+    },
+    {
+      "name": "address",
+      "description": "Saved address",
+      "type": {
+        "kind": "string"
+      },
+      "classification": "restricted"
+    }
+  ],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract"
+    ],
+    "maxEffect": "reversible_write",
+    "inputRelations": []
+  },
+  "targets": [
+    {
+      "id": "main_menu",
+      "description": "Return to the authenticated main menu from the persistent navigation region",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "member_inquiry",
+      "description": "Open member inquiry from the main menu",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_by",
+      "description": "Member inquiry search mode",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_value",
+      "description": "Member inquiry search value",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "search",
+      "description": "Submit member inquiry",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "select_member",
+      "description": "Select the result row for the exact requested member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "member_number_value",
+      "description": "Selected member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member No.:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "open_update",
+      "description": "Open member update form",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Update Member Information",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "transaction_token",
+      "description": "Current update-form token",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "_token"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "email",
+      "description": "Email field",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "email"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "phone",
+      "description": "Phone field",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "phone"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "address",
+      "description": "Mailing address field",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "address"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "save",
+      "description": "Save member information",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Save Changes",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "return_member_record",
+      "description": "Leave the successful update receipt and return to the member record",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Return to Member Record",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "email_value",
+      "description": "Member email address",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "E-mail:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "phone_value",
+      "description": "Member phone number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Phone:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "address_value",
+      "description": "Member mailing address",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Address:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "maintenance_continue",
+      "description": "Leave the declared maintenance interstitial",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.main-menu.3d7b9eb009c7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.member-inquiry.b5bedd0e025a",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.by.dd66fd31806d",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Member Number Last Name",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.q.0238afec13dd",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "q",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.search.ff721a99805c",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.select.e2a9a3f3c0cf",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Select",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Select",
+          "exact": true
+        },
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.e-mail.386372656c03",
+      "description": "Observed label value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "E-mail:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.phone.0d3431cd8fa2",
+      "description": "Observed label value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Phone:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.address.9ddd1ac96150",
+      "description": "Observed label value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Address:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.update-member-information.1d181d4f7453",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Update Member Information",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Update Member Information",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.email.6400552ddc6d",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "email",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "email"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.phone.7bce5363d89a",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "phone",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "phone"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.address.34a14f3e23fe",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "address",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "address"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.main-menu.3d7b9eb009c7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.main-menu.3d7b9eb009c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-inquiry.b5bedd0e025a",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.002.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.member-inquiry.b5bedd0e025a"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-inquiry.b5bedd0e025a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER INQUIRY / SELECTION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.by.dd66fd31806d",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.by.dd66fd31806d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.by.dd66fd31806d",
+        "operator": "equals",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.004.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.q.0238afec13dd",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.q.0238afec13dd",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.q.0238afec13dd",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.005.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.search.ff721a99805c"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.search.ff721a99805c",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.select.e2a9a3f3c0cf",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.006.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.select.e2a9a3f3c0cf"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.select.e2a9a3f3c0cf",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER RECORD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.007.extract",
+      "title": "extract Observed label value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.e-mail.386372656c03",
+        "outputName": "email_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.e-mail.386372656c03",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.e-mail.386372656c03",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.008.extract",
+      "title": "extract Observed label value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.phone.0d3431cd8fa2",
+        "outputName": "phone_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.phone.0d3431cd8fa2",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.phone.0d3431cd8fa2",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.009.extract",
+      "title": "extract Observed label value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.address.9ddd1ac96150",
+        "outputName": "address_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.address.9ddd1ac96150",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.address.9ddd1ac96150",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.010.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.update-member-information.1d181d4f7453"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.update-member-information.1d181d4f7453",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "UPDATE MEMBER INFORMATION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.011.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.email.6400552ddc6d",
+        "value": {
+          "kind": "input",
+          "name": "email"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.email.6400552ddc6d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.email.6400552ddc6d",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "email"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.012.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.phone.7bce5363d89a",
+        "value": {
+          "kind": "input",
+          "name": "phone"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.phone.7bce5363d89a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.phone.7bce5363d89a",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "phone"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.013.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.address.34a14f3e23fe",
+        "value": {
+          "kind": "input",
+          "name": "address"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.address.34a14f3e23fe",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.address.34a14f3e23fe",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "address"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "save_update",
+      "title": "Save reviewed member update",
+      "action": {
+        "kind": "click",
+        "targetId": "save"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "route",
+            "pattern": "^/members/[0-9]{6}/update$"
+          },
+          {
+            "kind": "target_present",
+            "targetId": "return_member_record",
+            "present": true
+          }
+        ]
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "reversible_write",
+      "approval": {
+        "kind": "user_confirmation",
+        "summaryTargets": [
+          "email",
+          "phone",
+          "address"
+        ],
+        "summarySources": {
+          "email": "value",
+          "phone": "value",
+          "address": "value"
+        },
+        "stateNonceTarget": "transaction_token",
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "id": "return_to_member_record",
+      "title": "Return to the updated member record",
+      "action": {
+        "kind": "click",
+        "targetId": "return_member_record"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "return_member_record",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}$"
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_saved_email",
+      "title": "Read saved email",
+      "action": {
+        "kind": "extract",
+        "targetId": "email_value",
+        "outputName": "email",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "email_value",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "email"
+        },
+        "redactActual": true
+      },
+      "postconditionFailureCode": "SAVED_VALUE_MISMATCH",
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_saved_phone",
+      "title": "Read saved phone",
+      "action": {
+        "kind": "extract",
+        "targetId": "phone_value",
+        "outputName": "phone",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "phone_value",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "phone"
+        },
+        "redactActual": true
+      },
+      "postconditionFailureCode": "SAVED_VALUE_MISMATCH",
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_saved_address",
+      "title": "Read saved address",
+      "action": {
+        "kind": "extract",
+        "targetId": "address_value",
+        "outputName": "address",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "address_value",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "address"
+        },
+        "redactActual": true
+      },
+      "postconditionFailureCode": "SAVED_VALUE_MISMATCH",
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "The MERIDIAN session expired; sign on again before retrying from the beginning.",
+      "category": "intervention",
+      "priority": 1000,
+      "condition": {
+        "kind": "http_status",
+        "status": 440
+      },
+      "effectCertainty": "not_applied",
+      "handoff": {
+        "kind": "same_session",
+        "action": "restore_session",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "code": "SUPERVISOR_REQUIRED",
+      "description": "This operation requires a separately authenticated supervisor session.",
+      "category": "intervention",
+      "priority": 990,
+      "condition": {
+        "kind": "http_status",
+        "status": 403
+      },
+      "effectCertainty": "not_applied",
+      "requiredRole": "supervisor",
+      "handoff": {
+        "kind": "same_session",
+        "action": "authenticate_supervisor",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000,
+        "trigger": {
+          "kind": "capability_role",
+          "role": "supervisor"
+        }
+      }
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "MAINTENANCE",
+      "description": "MERIDIAN entered its declared maintenance interstitial; return to the menu and restart safely.",
+      "category": "recoverable",
+      "priority": 960,
+      "condition": {
+        "kind": "http_status",
+        "status": 503
+      },
+      "recovery": {
+        "kind": "restart_run",
+        "action": {
+          "kind": "click",
+          "targetId": "maintenance_continue"
+        },
+        "maxAttempts": 1,
+        "waitMs": 0
+      }
+    },
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "description": "The browser is no longer authenticated; establish a new secure session.",
+      "category": "escalation",
+      "priority": 950,
+      "condition": {
+        "kind": "text_visible",
+        "text": "OPERATOR SIGN ON",
+        "exact": true
+      }
+    },
+    {
+      "code": "INVALID_EMAIL",
+      "description": "The email address is not in a valid format.",
+      "category": "business_outcome",
+      "priority": 940,
+      "condition": {
+        "kind": "text_visible",
+        "text": "E-mail address is not in a valid format.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "INVALID_PHONE",
+      "description": "The phone number is not valid.",
+      "category": "business_outcome",
+      "priority": 939,
+      "condition": {
+        "kind": "text_visible",
+        "text": "Phone number is not valid.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "INVALID_ADDRESS",
+      "description": "The mailing address is too short.",
+      "category": "business_outcome",
+      "priority": 938,
+      "condition": {
+        "kind": "text_visible",
+        "text": "Mailing address is too short.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "route",
+    "pattern": "^/members/[0-9]{6}$"
+  }
+}

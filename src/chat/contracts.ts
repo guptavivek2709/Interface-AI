@@ -36,6 +36,12 @@ export interface ChatToolDefinition {
   readonly capabilityVersion: string;
   readonly description: string;
   readonly inputSchema: z.ZodType;
+  /**
+   * Optional typed result contract used only to validate explicit prior-step
+   * bindings. It is never treated as provider output and never relaxes the
+   * deterministic runtime's authoritative output validation.
+   */
+  readonly outputSchema?: z.ZodType;
 }
 
 export interface ChatTextMessage {
@@ -65,7 +71,6 @@ export const ChatRouteMetadataSchema = z
     model: z.string().min(1).max(200).nullable(),
     responseId: z.string().min(1).max(300).nullable(),
     latencyMs: z.number().int().nonnegative(),
-    fallbackFrom: z.string().min(1).max(100).nullable(),
   })
   .strict();
 
@@ -90,9 +95,74 @@ export const ChatInvokeRouteSchema = z
   })
   .strict();
 
+const ChatSequenceIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z][A-Za-z0-9_-]*$/u);
+
+const ChatSequencePathSchema = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z][A-Za-z0-9_]*$/u),
+  )
+  .max(8);
+
+/**
+ * A downstream input may be sourced only from one collection produced by an
+ * earlier successful step. Exactly one row continues automatically; zero rows
+ * stop the sequence and multiple rows require a direct authenticated choice.
+ */
+export const ChatSequenceBindingSchema = z
+  .object({
+    sourceStepId: ChatSequenceIdentifierSchema,
+    sourceCollectionPath: ChatSequencePathSchema.min(1),
+    valuePath: ChatSequencePathSchema,
+    targetInput: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z][A-Za-z0-9_]*$/u),
+    selection: z.literal("exactly_one"),
+    onZero: z.literal("stop_no_match"),
+    onMany: z.literal("pause_for_authenticated_selection"),
+  })
+  .strict();
+
+export const ChatSequenceStepSchema = z
+  .object({
+    stepId: ChatSequenceIdentifierSchema,
+    toolName: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u),
+    capabilityId: z.string().min(1).max(200),
+    capabilityVersion: z.string().min(1).max(100),
+    literalArguments: JsonObjectSchema,
+    bindings: z.array(ChatSequenceBindingSchema).max(16),
+  })
+  .strict();
+
+/** Provider-neutral, model-proposed orchestration; the API binds every step. */
+export const ChatSequenceRouteSchema = z
+  .object({
+    kind: z.literal("sequence"),
+    toolCallId: z.string().min(1).max(300),
+    steps: z.array(ChatSequenceStepSchema).min(1).max(3),
+    failurePolicy: z.literal("stop_on_non_success"),
+    assistantText: z.string().min(1).max(16_000).nullable(),
+    metadata: ChatRouteMetadataSchema,
+  })
+  .strict();
+
+export type ChatSequenceBinding = z.infer<typeof ChatSequenceBindingSchema>;
+export type ChatSequenceStep = z.infer<typeof ChatSequenceStepSchema>;
+export type ChatSequenceRoute = z.infer<typeof ChatSequenceRouteSchema>;
+
 export const ChatRouteResultSchema = z.discriminatedUnion("kind", [
   ChatReplyRouteSchema,
   ChatInvokeRouteSchema,
+  ChatSequenceRouteSchema,
 ]);
 
 export type ChatRouteResult = z.infer<typeof ChatRouteResultSchema>;

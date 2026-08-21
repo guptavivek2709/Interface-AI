@@ -1,0 +1,754 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "member.search_by_number",
+    "name": "Select member by number",
+    "description": "Search by an exact member number and select only its row.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "read",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T05:58:39.661Z",
+    "goal": "From the authenticated MAIN MENU, click Main Menu, open Member Inquiry, select search mode Member Number, fill the search value from {{member_number}}, submit Search, select the exact matching member row, extract outputs member_number and member_name with those exact output names, and finish only when the Member Record heading is visible.",
+    "discoveryRunId": "discovery.f1a54963-5857-45af-b490-756cfbb6abe1",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "member_number",
+      "description": "Six-digit MERIDIAN member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number",
+        "minLength": 6,
+        "maxLength": 6,
+        "pattern": "^[0-9]{6}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "member_number",
+      "description": "Selected member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "member_name",
+      "description": "Selected member name",
+      "type": {
+        "kind": "string"
+      },
+      "classification": "confidential"
+    }
+  ],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract"
+    ],
+    "maxEffect": "read",
+    "inputRelations": []
+  },
+  "targets": [
+    {
+      "id": "target.main-menu.3d7b9eb009c7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.member-inquiry.b5bedd0e025a",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.by.dd66fd31806d",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Member Number Last Name",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.q.0238afec13dd",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "q",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.search.ff721a99805c",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.select.e2a9a3f3c0cf",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Select",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Select",
+          "exact": true
+        },
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.member-no.3722d89b4e24",
+      "description": "Observed label value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member No.:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.name.5f4f1a0c98c7",
+      "description": "Observed label value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Name:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "maintenance_continue",
+      "description": "Leave the declared maintenance interstitial",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.main-menu.3d7b9eb009c7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.main-menu.3d7b9eb009c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-inquiry.b5bedd0e025a",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.002.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.member-inquiry.b5bedd0e025a"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-inquiry.b5bedd0e025a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER INQUIRY / SELECTION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.by.dd66fd31806d",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.by.dd66fd31806d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.by.dd66fd31806d",
+        "operator": "equals",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.004.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.q.0238afec13dd",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.q.0238afec13dd",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.q.0238afec13dd",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.005.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.search.ff721a99805c"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.search.ff721a99805c",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.select.e2a9a3f3c0cf",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.006.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.select.e2a9a3f3c0cf"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.select.e2a9a3f3c0cf",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER RECORD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.007.extract",
+      "title": "extract Observed label value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.member-no.3722d89b4e24",
+        "outputName": "member_number",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-no.3722d89b4e24",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-no.3722d89b4e24",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.008.extract",
+      "title": "extract Observed label value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.name.5f4f1a0c98c7",
+        "outputName": "member_name",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.name.5f4f1a0c98c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.name.5f4f1a0c98c7",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "The MERIDIAN session expired; sign on again before retrying from the beginning.",
+      "category": "intervention",
+      "priority": 1000,
+      "condition": {
+        "kind": "http_status",
+        "status": 440
+      },
+      "effectCertainty": "not_applied",
+      "handoff": {
+        "kind": "same_session",
+        "action": "restore_session",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "code": "SUPERVISOR_REQUIRED",
+      "description": "This operation requires a separately authenticated supervisor session.",
+      "category": "intervention",
+      "priority": 990,
+      "condition": {
+        "kind": "http_status",
+        "status": 403
+      },
+      "effectCertainty": "not_applied",
+      "requiredRole": "supervisor",
+      "handoff": {
+        "kind": "same_session",
+        "action": "authenticate_supervisor",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000,
+        "trigger": {
+          "kind": "capability_role",
+          "role": "supervisor"
+        }
+      }
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "MAINTENANCE",
+      "description": "MERIDIAN entered its declared maintenance interstitial; return to the menu and restart safely.",
+      "category": "recoverable",
+      "priority": 960,
+      "condition": {
+        "kind": "http_status",
+        "status": 503
+      },
+      "recovery": {
+        "kind": "restart_run",
+        "action": {
+          "kind": "click",
+          "targetId": "maintenance_continue"
+        },
+        "maxAttempts": 1,
+        "waitMs": 0
+      }
+    },
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "description": "The browser is no longer authenticated; establish a new secure session.",
+      "category": "escalation",
+      "priority": 950,
+      "condition": {
+        "kind": "text_visible",
+        "text": "OPERATOR SIGN ON",
+        "exact": true
+      }
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "text_visible",
+    "text": "MEMBER RECORD",
+    "exact": true
+  }
+}

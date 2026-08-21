@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { ApprovalAuthority } from "../../src/approval/index.js";
 import {
   meridianOpenShareArtifact,
+  meridianPlaceHoldArtifact,
   meridianRecordAndBalancesArtifact,
+  meridianTransferArtifact,
   meridianUpdateMemberArtifact,
 } from "../../src/capabilities/index.js";
 import type {
@@ -24,6 +26,13 @@ function sameValue(left: RuntimeValue, right: RuntimeValue): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function scalarText(value: RuntimeValue): string {
+  if (value !== null && typeof value === "object" && !Array.isArray(value) && typeof value.amount === "string") {
+    return value.amount;
+  }
+  return String(value);
+}
+
 class MeridianContractRuntime implements ReplayRuntimeV2 {
   readonly sessionId = "meridian-contract-session";
   readonly sessionRef = "meridian-contract-session-reference";
@@ -40,13 +49,16 @@ class MeridianContractRuntime implements ReplayRuntimeV2 {
   constructor(
     artifact: CapabilityArtifactV2,
     inputs: Readonly<Record<string, RuntimeValue>>,
-    shares: RuntimeValue[] = [],
+    shares?: RuntimeValue[],
   ) {
     this.#artifact = artifact;
     this.#targets = new Map(artifact.targets.map((target) => [target.id, target]));
     this.#inputs = inputs;
     this.#origin = new URL(artifact.compatibility.entryPoint).origin;
-    this.#shares = shares;
+    this.#shares = shares ?? [
+      { share_id: "100234-S0001", type: "Checking", balance: { currency: "USD", amount: "250.00", minorUnits: 25_000 }, status: "OPEN" },
+      { share_id: "100234-S0070", type: "Savings", balance: { currency: "USD", amount: "150.00", minorUnits: 15_000 }, status: "OPEN" },
+    ];
     this.state = { url: `${this.#origin}/signon`, title: "MERIDIAN", httpStatus: 200, method: "GET" };
   }
 
@@ -74,7 +86,13 @@ class MeridianContractRuntime implements ReplayRuntimeV2 {
     } else if (action.kind === "click") {
       this.#click(action.targetId);
     } else if (action.kind === "extract") {
-      const value = this.#targetValue(action.targetId);
+      let value = this.#targetValue(action.targetId);
+      if (action.transform?.kind === "strip_exact_suffix") {
+        if (typeof value !== "string" || !value.endsWith(action.transform.suffix)) {
+          throw new Error("Missing exact extraction suffix");
+        }
+        value = value.slice(0, -action.transform.suffix.length).trim();
+      }
       if (action.bindingName) context.bindings[action.bindingName] = value;
       return {
         startedAt,
@@ -122,8 +140,8 @@ class MeridianContractRuntime implements ReplayRuntimeV2 {
       const matched = condition.operator === "equals"
         ? sameValue(actual, expected)
         : condition.operator === "contains"
-          ? String(actual).includes(String(expected))
-          : new RegExp(String(expected), "u").test(String(actual));
+          ? String(actual).includes(scalarText(expected))
+          : new RegExp(scalarText(expected), "u").test(String(actual));
       return { matched, summary: `target value matched=${matched}` };
     }
     if (condition.kind === "http_status") {
@@ -168,15 +186,28 @@ class MeridianContractRuntime implements ReplayRuntimeV2 {
       return;
     } else if (targetId === "select_member") pathname = `/members/${member}`;
     else if (targetId === "open_transaction") {
-      pathname = `/members/${member}/${this.#artifact.capability.id === "share.open" ? "open-share" : "transfer"}`;
+      const transaction = this.#artifact.capability.id === "share.open"
+        ? "open-share"
+        : this.#artifact.capability.id === "account.place_hold"
+          ? "hold"
+          : "transfer";
+      pathname = `/members/${member}/${transaction}`;
     } else if (targetId === "open_update") pathname = `/members/${member}/update`;
     else if (targetId === "continue") pathname = `${new URL(this.state.url).pathname}/review`;
     else if (targetId === "commit") {
       pathname = new URL(this.state.url).pathname.replace(/\/review$/u, "/post");
       this.commitCount += 1;
+      const title = this.#artifact.capability.id === "share.open"
+        ? "Share Opened - Meridian Core"
+        : this.#artifact.capability.id === "account.place_hold"
+          ? "Hold Applied - Meridian Core"
+          : "Transfer Posted - Meridian Core";
+      this.state = { ...this.state, title };
     } else if (targetId === "save") {
-      pathname = `/members/${member}`;
+      pathname = `/members/${member}/update`;
       this.commitCount += 1;
+    } else if (targetId === "return_member_record") {
+      pathname = `/members/${member}`;
     }
     if (pathname) this.state = { ...this.state, url: `${this.#origin}${pathname}`, method: "GET" };
   }
@@ -188,13 +219,37 @@ class MeridianContractRuntime implements ReplayRuntimeV2 {
     const values: Record<string, RuntimeValue> = {
       member_number_value: member,
       member_name_value: "Ada Member",
-      email_value: this.#inputs.email ?? "ada@example.test",
-      phone_value: this.#inputs.phone ?? "+1 (206) 555-0142",
-      address_value: this.#inputs.address ?? "10 Main Street",
-      transaction_token: "deadbeef-abc",
+      email_value: this.commitCount > 0 ? this.#inputs.email ?? "ada@example.test" : "ada@example.test",
+      phone_value: this.commitCount > 0 ? this.#inputs.phone ?? "+1 (206) 555-0142" : "+1 (206) 555-0142",
+      address_value: this.commitCount > 0 ? this.#inputs.address ?? "10 Main Street" : "10 Main Street",
+      transaction_token: "opaque/K9x:Yz!2026",
       review_member: member,
       review_type: this.#inputs.share_type ?? "S0001",
       review_deposit: this.#inputs.initial_deposit ?? { currency: "USD", amount: "25.00", minorUnits: 2_500 },
+      review_from: this.#inputs.from_share ?? "100234-S0001",
+      review_to: this.#inputs.to_share ?? "100234-S0070",
+      review_amount: this.#inputs.amount ?? { currency: "USD", amount: "5.00", minorUnits: 500 },
+      review_memo: this.#inputs.memo ?? "Contract verification",
+      review_share: this.#inputs.share ?? "100234-S0001",
+      review_reason: this.#inputs.reason ?? "FRAUD",
+      review_notes: this.#inputs.notes ?? "Contract verification",
+      receipt_confirmation: this.#artifact.capability.id === "share.open"
+        ? "NS-ABC123"
+        : this.#artifact.capability.id === "account.place_hold"
+          ? "HD-ABC123"
+          : "TR-ABC123",
+      receipt_posted: "2026-08-20T18:00:00.000Z",
+      receipt_amount: `$${String((this.#inputs.amount as { amount?: string } | undefined)?.amount ?? "5.00")}`,
+      source_balance_before: "$250.00",
+      destination_balance_before: "$150.00",
+      share_status_before: "OPEN",
+      receipt_source_balance: "$245.00 (new balance)",
+      receipt_destination_balance: "$155.00 (new balance)",
+      receipt_new_share_id: `${String(member)}-${String(this.#inputs.share_type ?? "S0001")}-0003`,
+      receipt_share_type: this.#inputs.share_type ?? "S0001",
+      receipt_opening_balance: `$${String((this.#inputs.initial_deposit as { amount?: string } | undefined)?.amount ?? "25.00")}`,
+      receipt_share_status: `${String(this.#inputs.share ?? "100234-S0001")} is now HOLD`,
+      receipt_applied: "2026-08-20T18:00:00.000Z",
       email: this.#inputs.email ?? "ada@example.test",
       phone: this.#inputs.phone ?? "+1 (206) 555-0142",
       address: this.#inputs.address ?? "10 Main Street",
@@ -239,7 +294,94 @@ describe("bundled MERIDIAN artifacts through ReplayRunnerV2", () => {
     expect(runtime.commitCount).toBe(0);
 
     const completed = await runner.resume(runner.issueApproval({ id: "operator-1", roles: ["teller"] }));
-    expect(completed).toMatchObject({ status: "terminal", result: { status: "success" } });
+    expect(completed).toMatchObject({
+      status: "terminal",
+      result: {
+        status: "success",
+        outputs: {
+          shares_before: [
+            {
+              share_id: "100234-S0001",
+              type: "Checking",
+              balance: { currency: "USD", amount: "250.00", minorUnits: 25_000 },
+              status: "OPEN",
+            },
+            {
+              share_id: "100234-S0070",
+              type: "Savings",
+              balance: { currency: "USD", amount: "150.00", minorUnits: 15_000 },
+              status: "OPEN",
+            },
+          ],
+          confirmation: "NS-ABC123",
+          new_share_id: "100234-S0070-0003",
+          share_type: "S0070",
+          opening_balance: { currency: "USD", amount: "25.00", minorUnits: 2_500 },
+        },
+      },
+    });
+    expect(runtime.commitCount).toBe(1);
+  });
+
+  it("returns a typed transfer receipt with both resulting balances", async () => {
+    const inputs = {
+      member_number: "100234",
+      from_share: "100234-S0001",
+      to_share: "100234-S0070",
+      amount: { currency: "USD", amount: "5.00", minorUnits: 500 },
+      memo: "Contract verification",
+    };
+    const runtime = new MeridianContractRuntime(meridianTransferArtifact, inputs);
+    const runner = new ReplayRunnerV2({ artifact: meridianTransferArtifact, inputs, runtime, approvalAuthority: authority() });
+
+    const paused = await runner.run();
+    if (paused.status !== "awaiting_approval") throw new Error("Expected transfer approval");
+    const completed = await runner.resume(runner.issueApproval({ id: "operator-1", roles: ["teller"] }));
+
+    expect(completed).toMatchObject({
+      status: "terminal",
+      result: {
+        status: "success",
+        outputs: {
+          source_balance_before: { currency: "USD", amount: "250.00", minorUnits: 25_000 },
+          destination_balance_before: { currency: "USD", amount: "150.00", minorUnits: 15_000 },
+          confirmation: "TR-ABC123",
+          posted_at: "2026-08-20T18:00:00.000Z",
+          amount: { currency: "USD", amount: "5.00", minorUnits: 500 },
+          source_balance: { currency: "USD", amount: "245.00", minorUnits: 24_500 },
+          destination_balance: { currency: "USD", amount: "155.00", minorUnits: 15_500 },
+        },
+      },
+    });
+    expect(runtime.commitCount).toBe(1);
+  });
+
+  it("returns an exact supervisor hold receipt", async () => {
+    const inputs = {
+      member_number: "100234",
+      share: "100234-S0001",
+      reason: "FRAUD",
+      notes: "Contract verification",
+    };
+    const runtime = new MeridianContractRuntime(meridianPlaceHoldArtifact, inputs);
+    const runner = new ReplayRunnerV2({ artifact: meridianPlaceHoldArtifact, inputs, runtime, approvalAuthority: authority() });
+
+    const paused = await runner.run();
+    if (paused.status !== "awaiting_approval") throw new Error("Expected supervisor approval");
+    const completed = await runner.resume(runner.issueApproval({ id: "supervisor-1", roles: ["supervisor"] }));
+
+    expect(completed).toMatchObject({
+      status: "terminal",
+      result: {
+        status: "success",
+        outputs: {
+          share_status_before: "OPEN",
+          confirmation: "HD-ABC123",
+          share_status: "100234-S0001 is now HOLD",
+          applied_at: "2026-08-20T18:00:00.000Z",
+        },
+      },
+    });
     expect(runtime.commitCount).toBe(1);
   });
 
@@ -289,7 +431,14 @@ describe("bundled MERIDIAN artifacts through ReplayRunnerV2", () => {
       status: "terminal",
       result: {
         status: "success",
-        outputs: { email: inputs.email, phone: inputs.phone, address: inputs.address },
+        outputs: {
+          email_before: "ada@example.test",
+          phone_before: "+1 (206) 555-0142",
+          address_before: "10 Main Street",
+          email: inputs.email,
+          phone: inputs.phone,
+          address: inputs.address,
+        },
       },
     });
     expect(runtime.commitCount).toBe(1);

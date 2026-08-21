@@ -10,8 +10,9 @@ import {
 } from "../domain/index.js";
 import {
   MERIDIAN_ADAPTER,
-  MERIDIAN_DEFAULT_ORIGIN,
+  MERIDIAN_APP_VERSION,
   MERIDIAN_PRODUCT,
+  MERIDIAN_VENDOR_ORIGIN,
 } from "../profiles/meridianCore.js";
 
 const createdAt = "2026-08-20T18:00:00.000Z";
@@ -47,6 +48,50 @@ const target = {
       sensitive,
     };
   },
+  inputLabelValue(
+    id: string,
+    inputName: string,
+    suffix: string,
+    description: string,
+    sensitive = false,
+  ): TargetV2 {
+    return {
+      id,
+      description,
+      framePath: [],
+      strategies: [{
+        kind: "label_value_expr",
+        label: { kind: "input", name: inputName },
+        prefix: "",
+        suffix,
+        valueCellOffset: 1,
+      }],
+      cardinality: "exactly_one",
+      sensitive,
+    };
+  },
+  tableRowValue(
+    id: string,
+    keyInput: string,
+    valueColumn: string,
+    description: string,
+    sensitive = false,
+  ): TargetV2 {
+    return {
+      id,
+      description,
+      framePath: [],
+      strategies: [{
+        kind: "table_row_value",
+        headers: ["Share ID", "Type", "Balance", "Status"],
+        keyColumn: "Share ID",
+        key: { kind: "input", name: keyInput },
+        valueColumn,
+      }],
+      cardinality: "exactly_one",
+      sensitive,
+    };
+  },
   table(id: string, headers: string[], description: string, sensitive = false): TargetV2 {
     return {
       id,
@@ -59,7 +104,19 @@ const target = {
   },
 };
 
-const mainMenu = target.role("main_menu", "link", "Main Menu", "Return to the authenticated main menu");
+const mainMenu: TargetV2 = {
+  id: "main_menu",
+  description: "Return to the authenticated main menu from the persistent navigation region",
+  framePath: [],
+  strategies: [{
+    kind: "navigation_link",
+    name: "Main Menu",
+    exact: true,
+    companionText: "Member Inquiry",
+  }],
+  cardinality: "exactly_one",
+  sensitive: false,
+};
 const memberInquiry = target.role(
   "member_inquiry",
   "link",
@@ -109,6 +166,43 @@ const sharesTable = target.table(
   ["Share ID", "Type", "Balance", "Status"],
   "Selected member shares and balances",
   true,
+);
+
+const shareSetOutput = (name: string, description: string): CapabilityArtifactV2["outputs"][number] => ({
+  name,
+  description,
+  type: {
+    kind: "array",
+    maxItems: 100,
+    items: {
+      kind: "object",
+      properties: {
+        share_id: { kind: "string", format: "share_id" },
+        type: { kind: "string" },
+        balance: { kind: "money", currency: "USD" },
+        status: { kind: "string" },
+      },
+      required: ["share_id", "type", "balance", "status"],
+    },
+  },
+  classification: "restricted",
+});
+
+const shareSetExtraction = (id: string, title: string, outputName: string): StepV2 => step(
+  id,
+  title,
+  {
+    kind: "extract_table",
+    targetId: "shares_table",
+    outputName,
+    columns: [
+      { header: "Share ID", key: "share_id", type: { kind: "string", format: "share_id" }, classification: "restricted" },
+      { header: "Type", key: "type", type: { kind: "string" }, classification: "internal" },
+      { header: "Balance", key: "balance", type: { kind: "money", currency: "USD" }, classification: "restricted" },
+      { header: "Status", key: "status", type: { kind: "string" }, classification: "internal" },
+    ],
+  },
+  { kind: "target_present", targetId: "shares_table", present: true },
 );
 
 const stringInput = (
@@ -180,17 +274,34 @@ function commonStates(extra: RuntimeStateRuleV2[] = []): RuntimeStateRuleV2[] {
     {
       code: "SESSION_EXPIRED",
       description: "The MERIDIAN session expired; sign on again before retrying from the beginning.",
-      category: "escalation",
+      category: "intervention",
       priority: 1_000,
       condition: { kind: "http_status", status: 440 },
+      effectCertainty: "not_applied",
+      handoff: {
+        kind: "same_session",
+        action: "restore_session",
+        resume: { kind: "restart_run" },
+        revalidate: [{ kind: "route", pattern: "^/menu$" }],
+        expiresInMs: 120_000,
+      },
     },
     {
       code: "SUPERVISOR_REQUIRED",
       description: "This operation requires a separately authenticated supervisor session.",
-      category: "escalation",
+      category: "intervention",
       priority: 990,
       condition: { kind: "http_status", status: 403 },
+      effectCertainty: "not_applied",
       requiredRole: "supervisor",
+      handoff: {
+        kind: "same_session",
+        action: "authenticate_supervisor",
+        resume: { kind: "restart_run" },
+        revalidate: [{ kind: "route", pattern: "^/menu$" }],
+        expiresInMs: 120_000,
+        trigger: { kind: "capability_role", role: "supervisor" },
+      },
     },
     {
       code: "RECORD_NOT_FOUND",
@@ -371,7 +482,10 @@ interface BuildArtifact {
 }
 
 function build(spec: BuildArtifact): CapabilityArtifactV2 {
-  const origin = spec.origin ?? MERIDIAN_DEFAULT_ORIGIN;
+  // Approved artifacts describe the vendor product, not a deployment instance.
+  // A signed TargetProfileV2 binds this immutable base artifact to the actual
+  // hosted origin at execution time.
+  const origin = spec.origin ?? MERIDIAN_VENDOR_ORIGIN;
   return CapabilityArtifactV2Schema.parse({
     schemaVersion: "2.0",
     capability: {
@@ -391,7 +505,7 @@ function build(spec: BuildArtifact): CapabilityArtifactV2 {
     compatibility: {
       surfaceAdapter: MERIDIAN_ADAPTER,
       vendorProduct: MERIDIAN_PRODUCT,
-      appVersion: "4.2.1",
+      appVersion: MERIDIAN_APP_VERSION,
       entryPoint: `${origin}/signon`,
     },
     inputs: spec.inputs,
@@ -499,7 +613,12 @@ export const meridianSignOnArtifact = build({
       priority: 995,
       condition: { kind: "text_visible", text: "Invalid operator ID or password.", exact: true },
     },
-  ]).filter((state) => state.code !== "AUTHENTICATION_REQUIRED"),
+  ]).filter(
+    (state) =>
+      state.code !== "AUTHENTICATION_REQUIRED" &&
+      state.code !== "SESSION_EXPIRED" &&
+      state.code !== "SUPERVISOR_REQUIRED",
+  ),
   checkpoint: { kind: "route", pattern: "^/menu$" },
   allowedActions: ["fill", "select", "click"],
   maxEffect: "draft",
@@ -687,6 +806,7 @@ function transactionTargets(kind: "transfer" | "open" | "hold"): TargetV2[] {
     searchButton,
     selectedMember(),
     memberNumberValue,
+    sharesTable,
     target.name("transaction_token", "_token", "Current form anti-replay token", true),
     maintenanceContinue,
   ];
@@ -694,6 +814,8 @@ function transactionTargets(kind: "transfer" | "open" | "hold"): TargetV2[] {
     return [
       ...common,
       target.role("open_transaction", "link", "Funds Transfer", "Open funds transfer"),
+      target.tableRowValue("source_balance_before", "from_share", "Balance", "Source share balance before posting", true),
+      target.tableRowValue("destination_balance_before", "to_share", "Balance", "Destination share balance before posting", true),
       target.name("from_share", "from", "Source share"),
       target.name("to_share", "to", "Destination share"),
       target.name("amount", "amount", "Transfer amount", true),
@@ -705,6 +827,23 @@ function transactionTargets(kind: "transfer" | "open" | "hold"): TargetV2[] {
       target.value("review_to", "To:", "Reviewed destination share", true),
       target.value("review_amount", "Amount:", "Reviewed transfer amount", true),
       target.value("review_memo", "Memo:", "Reviewed memo", true),
+      target.value("receipt_confirmation", "Confirmation:", "Posted transfer confirmation reference"),
+      target.value("receipt_posted", "Posted:", "Posted transfer timestamp"),
+      target.value("receipt_amount", "Amount:", "Posted transfer amount", true),
+      target.inputLabelValue(
+        "receipt_source_balance",
+        "from_share",
+        ":",
+        "Source share balance reported after posting",
+        true,
+      ),
+      target.inputLabelValue(
+        "receipt_destination_balance",
+        "to_share",
+        ":",
+        "Destination share balance reported after posting",
+        true,
+      ),
     ];
   }
   if (kind === "open") {
@@ -718,11 +857,16 @@ function transactionTargets(kind: "transfer" | "open" | "hold"): TargetV2[] {
       target.value("review_member", "Member:", "Reviewed member", true),
       target.value("review_type", "Share Type:", "Reviewed share type"),
       target.value("review_deposit", "Initial Deposit:", "Reviewed initial deposit", true),
+      target.value("receipt_confirmation", "Confirmation:", "Opened-share confirmation reference"),
+      target.value("receipt_new_share_id", "New Share ID:", "Newly opened share ID", true),
+      target.value("receipt_share_type", "Type:", "Opened share type"),
+      target.value("receipt_opening_balance", "Opening Balance:", "Opened share balance", true),
     ];
   }
   return [
     ...common,
     target.role("open_transaction", "link", "Place Account Hold", "Open account hold form"),
+    target.tableRowValue("share_status_before", "share", "Status", "Selected share status before the hold", true),
     target.name("share", "share", "Share to hold", true),
     target.name("reason", "reason", "Hold reason code"),
     target.name("notes", "notes", "Hold notes", true),
@@ -732,22 +876,35 @@ function transactionTargets(kind: "transfer" | "open" | "hold"): TargetV2[] {
     target.value("review_share", "Share:", "Reviewed share", true),
     target.value("review_reason", "Reason:", "Reviewed hold reason"),
     target.value("review_notes", "Notes:", "Reviewed hold notes", true),
+    target.value("receipt_confirmation", "Confirmation:", "Applied-hold confirmation reference"),
+    target.value("receipt_share_status", "Share:", "Share status reported after the hold", true),
+    target.value("receipt_applied", "Applied:", "Applied-hold timestamp"),
   ];
 }
 
 function tokenCondition() {
   return {
-    kind: "target_value" as const,
-    targetId: "transaction_token",
-    operator: "matches" as const,
-    value: { kind: "literal" as const, value: "^[a-f0-9]{8}-[a-f0-9]{3}$" },
-    redactActual: true,
+    kind: "all" as const,
+    conditions: [
+      { kind: "target_present" as const, targetId: "transaction_token", present: true },
+      {
+        kind: "target_value" as const,
+        targetId: "transaction_token",
+        operator: "matches" as const,
+        value: { kind: "literal" as const, value: "^[^\\r\\n]{1,256}(?![\\s\\S])" },
+        redactActual: true,
+      },
+    ],
   };
 }
 
-function transactionPrelude(pathName: "transfer" | "open-share" | "hold"): StepV2[] {
+function transactionPrelude(
+  pathName: "transfer" | "open-share" | "hold",
+  beforeOpen: StepV2[] = [],
+): StepV2[] {
   return [
     ...memberSearchSteps("number", "member_number", true),
+    ...beforeOpen,
     step(
       "open_transaction",
       "Open transaction form",
@@ -761,17 +918,43 @@ function transactionPrelude(pathName: "transfer" | "open-share" | "hold"): StepV
 
 const postCheckpoint = (
   pathName: "transfer" | "open-share" | "hold",
-  confirmedTitle?: string,
+  confirmedTitle: string,
+  receiptTargetIds: readonly string[],
 ) => ({
   kind: "all" as const,
   conditions: [
     { kind: "route" as const, pattern: `^/members/[0-9]{6}/${pathName}/post$` },
     { kind: "http_status" as const, status: 200 },
-    ...(confirmedTitle
-      ? [{ kind: "page_title" as const, title: confirmedTitle, exact: true }]
-      : []),
+    { kind: "page_title" as const, title: confirmedTitle, exact: true },
+    ...receiptTargetIds.map((targetId) => ({
+      kind: "target_present" as const,
+      targetId,
+      present: true,
+    })),
   ],
 });
+
+const receiptExtraction = (
+  id: string,
+  title: string,
+  targetId: string,
+  outputName: string,
+  postcondition?: StepV2["postcondition"],
+  stripExactSuffix?: string,
+): StepV2 => step(
+  id,
+  title,
+  {
+    kind: "extract",
+    targetId,
+    outputName,
+    source: "text",
+    ...(stripExactSuffix
+      ? { transform: { kind: "strip_exact_suffix" as const, suffix: stripExactSuffix } }
+      : {}),
+  },
+  postcondition ?? { kind: "target_present", targetId, present: true },
+);
 
 export const meridianTransferArtifact = build({
   id: "funds.transfer",
@@ -786,7 +969,15 @@ export const meridianTransferArtifact = build({
     { name: "amount", description: "Positive USD amount", type: { kind: "money", currency: "USD", minimumMinorUnits: 1 }, required: true, classification: "restricted" },
     stringInput("memo", "Transfer memo", { type: { kind: "string", maxLength: 60 }, classification: "confidential" }),
   ],
-  outputs: [],
+  outputs: [
+    { name: "source_balance_before", description: "Source share balance captured before transfer review", type: { kind: "money", currency: "USD" }, classification: "restricted" },
+    { name: "destination_balance_before", description: "Destination share balance captured before transfer review", type: { kind: "money", currency: "USD" }, classification: "restricted" },
+    { name: "confirmation", description: "MERIDIAN transfer confirmation reference", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+    { name: "posted_at", description: "Timestamp reported by MERIDIAN for the posted transfer", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+    { name: "amount", description: "Amount confirmed on the posted transfer receipt", type: { kind: "money", currency: "USD", minimumMinorUnits: 1 }, classification: "restricted" },
+    { name: "source_balance", description: "Source share balance reported after the transfer", type: { kind: "money", currency: "USD" }, classification: "restricted" },
+    { name: "destination_balance", description: "Destination share balance reported after the transfer", type: { kind: "money", currency: "USD" }, classification: "restricted" },
+  ],
   targets: transactionTargets("transfer"),
   inputRelations: [
     { kind: "starts_with_input", value: "from_share", prefix: "member_number", separator: "-" },
@@ -794,14 +985,30 @@ export const meridianTransferArtifact = build({
     { kind: "not_equal", left: "from_share", right: "to_share" },
   ],
   steps: [
-    ...transactionPrelude("transfer"),
+    ...transactionPrelude("transfer", [
+      receiptExtraction("extract_source_balance_before", "Read source balance before transfer", "source_balance_before", "source_balance_before"),
+      receiptExtraction("extract_destination_balance_before", "Read destination balance before transfer", "destination_balance_before", "destination_balance_before"),
+    ]),
     step("choose_source", "Choose source share", { kind: "select", targetId: "from_share", value: { kind: "input", name: "from_share" } }, { kind: "target_value", targetId: "from_share", operator: "equals", value: { kind: "input", name: "from_share" }, redactActual: true }, "draft"),
     step("choose_destination", "Choose destination share", { kind: "select", targetId: "to_share", value: { kind: "input", name: "to_share" } }, { kind: "target_value", targetId: "to_share", operator: "equals", value: { kind: "input", name: "to_share" }, redactActual: true }, "draft"),
     step("enter_amount", "Enter amount", { kind: "fill", targetId: "amount", value: { kind: "input", name: "amount" } }, { kind: "target_value", targetId: "amount", operator: "equals", value: { kind: "input", name: "amount" }, redactActual: true }, "draft"),
     step("enter_memo", "Enter memo", { kind: "fill", targetId: "memo", value: { kind: "input", name: "memo" } }, { kind: "target_value", targetId: "memo", operator: "equals", value: { kind: "input", name: "memo" }, redactActual: true }, "draft"),
     step("review_transfer", "Continue to transfer review", { kind: "click", targetId: "continue" }, { kind: "route", pattern: "^/members/[0-9]{6}/transfer/review$" }, "review", [tokenCondition()]),
     {
-      ...step("commit_transfer", "Post reviewed transfer", { kind: "click", targetId: "commit" }, postCheckpoint("transfer", "Transfer Posted - Meridian Core"), "irreversible_commit", [tokenCondition()]),
+      ...step(
+        "commit_transfer",
+        "Post reviewed transfer",
+        { kind: "click", targetId: "commit" },
+        postCheckpoint("transfer", "Transfer Posted - Meridian Core", [
+          "receipt_confirmation",
+          "receipt_posted",
+          "receipt_amount",
+          "receipt_source_balance",
+          "receipt_destination_balance",
+        ]),
+        "irreversible_commit",
+        [tokenCondition()],
+      ),
       approval: {
         kind: "user_confirmation",
         summaryTargets: ["review_member", "review_from", "review_to", "review_amount", "review_memo"],
@@ -810,12 +1017,29 @@ export const meridianTransferArtifact = build({
         expiresInMs: 120_000,
       },
     },
+    receiptExtraction("extract_transfer_confirmation", "Read transfer confirmation", "receipt_confirmation", "confirmation"),
+    receiptExtraction("extract_transfer_posted_at", "Read transfer posting time", "receipt_posted", "posted_at"),
+    receiptExtraction(
+      "extract_transfer_amount",
+      "Read posted transfer amount",
+      "receipt_amount",
+      "amount",
+      { kind: "target_value", targetId: "receipt_amount", operator: "contains", value: { kind: "input", name: "amount" }, redactActual: true },
+    ),
+    receiptExtraction("extract_transfer_source_balance", "Read resulting source balance", "receipt_source_balance", "source_balance", undefined, " (new balance)"),
+    receiptExtraction("extract_transfer_destination_balance", "Read resulting destination balance", "receipt_destination_balance", "destination_balance", undefined, " (new balance)"),
   ],
   states: commonStates([
     { code: "INSUFFICIENT_FUNDS", description: "The source share has insufficient available balance.", category: "business_outcome", priority: 940, effectCertainty: "not_applied", condition: { kind: "text_visible", text: "Insufficient available balance in the source share.", exact: true } },
     { code: "SOURCE_SHARE_HELD", description: "The source share is on hold and cannot be debited.", category: "business_outcome", priority: 935, effectCertainty: "not_applied", condition: { kind: "text_visible", text: "Source share is HOLD and cannot be debited.", exact: true } },
   ]),
-  checkpoint: postCheckpoint("transfer", "Transfer Posted - Meridian Core"),
+  checkpoint: postCheckpoint("transfer", "Transfer Posted - Meridian Core", [
+    "receipt_confirmation",
+    "receipt_posted",
+    "receipt_amount",
+    "receipt_source_balance",
+    "receipt_destination_balance",
+  ]),
   allowedActions: ["click", "fill", "select", "extract"],
   maxEffect: "irreversible_commit",
 });
@@ -831,15 +1055,35 @@ export const meridianOpenShareArtifact = build({
     stringInput("share_type", "Stable MERIDIAN share type code", { type: { kind: "string", enum: ["S0001", "S0070", "MMKT", "CERT"] }, classification: "internal" }),
     { name: "initial_deposit", description: "USD initial deposit", type: { kind: "money", currency: "USD", minimumMinorUnits: 1 }, required: true, classification: "restricted" },
   ],
-  outputs: [],
+  outputs: [
+    shareSetOutput("shares_before", "Complete share set captured before opening a new share"),
+    { name: "confirmation", description: "MERIDIAN new-share confirmation reference", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+    { name: "new_share_id", description: "Stable ID assigned to the newly opened share", type: { kind: "string", format: "share_id", pattern: "^[0-9]{6}-[A-Z0-9-]{5,20}$" }, classification: "restricted" },
+    { name: "share_type", description: "Display type confirmed by MERIDIAN for the opened share", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+    { name: "opening_balance", description: "Opening balance confirmed by MERIDIAN", type: { kind: "money", currency: "USD", minimumMinorUnits: 1 }, classification: "restricted" },
+  ],
   targets: transactionTargets("open"),
   steps: [
-    ...transactionPrelude("open-share"),
+    ...transactionPrelude("open-share", [
+      shareSetExtraction("extract_shares_before_open", "Read share set before opening", "shares_before"),
+    ]),
     step("choose_share_type", "Choose share type", { kind: "select", targetId: "share_type", value: { kind: "input", name: "share_type" } }, { kind: "target_value", targetId: "share_type", operator: "equals", value: { kind: "input", name: "share_type" }, redactActual: false }, "draft"),
     step("enter_deposit", "Enter initial deposit", { kind: "fill", targetId: "deposit", value: { kind: "input", name: "initial_deposit" } }, { kind: "target_value", targetId: "deposit", operator: "equals", value: { kind: "input", name: "initial_deposit" }, redactActual: true }, "draft"),
     step("review_new_share", "Continue to new-share review", { kind: "click", targetId: "continue" }, { kind: "route", pattern: "^/members/[0-9]{6}/open-share/review$" }, "review", [tokenCondition()]),
     {
-      ...step("commit_new_share", "Open reviewed share", { kind: "click", targetId: "commit" }, postCheckpoint("open-share"), "irreversible_commit", [tokenCondition()]),
+      ...step(
+        "commit_new_share",
+        "Open reviewed share",
+        { kind: "click", targetId: "commit" },
+        postCheckpoint("open-share", "Share Opened - Meridian Core", [
+          "receipt_confirmation",
+          "receipt_new_share_id",
+          "receipt_share_type",
+          "receipt_opening_balance",
+        ]),
+        "irreversible_commit",
+        [tokenCondition()],
+      ),
       approval: {
         kind: "user_confirmation",
         summaryTargets: ["review_member", "review_type", "review_deposit"],
@@ -848,9 +1092,29 @@ export const meridianOpenShareArtifact = build({
         expiresInMs: 120_000,
       },
     },
+    receiptExtraction("extract_open_share_confirmation", "Read new-share confirmation", "receipt_confirmation", "confirmation"),
+    receiptExtraction("extract_new_share_id", "Read the assigned share ID", "receipt_new_share_id", "new_share_id"),
+    receiptExtraction(
+      "extract_opened_share_type",
+      "Read the opened share type",
+      "receipt_share_type",
+      "share_type",
+    ),
+    receiptExtraction(
+      "extract_opening_balance",
+      "Read the opening balance",
+      "receipt_opening_balance",
+      "opening_balance",
+      { kind: "target_value", targetId: "receipt_opening_balance", operator: "contains", value: { kind: "input", name: "initial_deposit" }, redactActual: true },
+    ),
   ],
-  checkpoint: postCheckpoint("open-share"),
-  allowedActions: ["click", "fill", "select", "extract"],
+  checkpoint: postCheckpoint("open-share", "Share Opened - Meridian Core", [
+    "receipt_confirmation",
+    "receipt_new_share_id",
+    "receipt_share_type",
+    "receipt_opening_balance",
+  ]),
+  allowedActions: ["click", "fill", "select", "extract", "extract_table"],
   maxEffect: "irreversible_commit",
 });
 
@@ -867,6 +1131,9 @@ export const meridianUpdateMemberArtifact = build({
     stringInput("address", "Updated mailing address", { type: { kind: "string", minLength: 5, maxLength: 160 }, classification: "restricted" }),
   ],
   outputs: [
+    { name: "email_before", description: "Email captured before the update", type: { kind: "string", format: "email" }, classification: "confidential" },
+    { name: "phone_before", description: "Phone captured before the update", type: { kind: "string", format: "phone" }, classification: "confidential" },
+    { name: "address_before", description: "Address captured before the update", type: { kind: "string" }, classification: "restricted" },
     { name: "email", description: "Saved email", type: { kind: "string", format: "email" }, classification: "confidential" },
     { name: "phone", description: "Saved phone", type: { kind: "string", format: "phone" }, classification: "confidential" },
     { name: "address", description: "Saved address", type: { kind: "string" }, classification: "restricted" },
@@ -885,6 +1152,12 @@ export const meridianUpdateMemberArtifact = build({
     target.name("phone", "phone", "Phone field", true),
     target.name("address", "address", "Mailing address field", true),
     target.role("save", "button", "Save Changes", "Save member information"),
+    target.role(
+      "return_member_record",
+      "link",
+      "Return to Member Record",
+      "Leave the successful update receipt and return to the member record",
+    ),
     emailValue,
     phoneValue,
     addressValue,
@@ -892,12 +1165,28 @@ export const meridianUpdateMemberArtifact = build({
   ],
   steps: [
     ...memberSearchSteps("number", "member_number", true),
+    receiptExtraction("extract_email_before", "Read email before update", "email_value", "email_before"),
+    receiptExtraction("extract_phone_before", "Read phone before update", "phone_value", "phone_before"),
+    receiptExtraction("extract_address_before", "Read address before update", "address_value", "address_before"),
     step("open_update", "Open member update", { kind: "click", targetId: "open_update" }, { kind: "route", pattern: "^/members/[0-9]{6}/update$" }, "read", [{ kind: "target_present", targetId: "open_update", present: true }]),
     step("enter_email", "Enter email", { kind: "fill", targetId: "email", value: { kind: "input", name: "email" } }, { kind: "target_value", targetId: "email", operator: "equals", value: { kind: "input", name: "email" }, redactActual: true }, "draft"),
     step("enter_phone", "Enter phone", { kind: "fill", targetId: "phone", value: { kind: "input", name: "phone" } }, { kind: "target_value", targetId: "phone", operator: "equals", value: { kind: "input", name: "phone" }, redactActual: true }, "draft"),
     step("enter_address", "Enter address", { kind: "fill", targetId: "address", value: { kind: "input", name: "address" } }, { kind: "target_value", targetId: "address", operator: "equals", value: { kind: "input", name: "address" }, redactActual: true }, "draft"),
     {
-      ...step("save_update", "Save reviewed member update", { kind: "click", targetId: "save" }, { kind: "route", pattern: "^/members/[0-9]{6}$" }, "reversible_write", [tokenCondition()]),
+      ...step(
+        "save_update",
+        "Save reviewed member update",
+        { kind: "click", targetId: "save" },
+        {
+          kind: "all",
+          conditions: [
+            { kind: "route", pattern: "^/members/[0-9]{6}/update$" },
+            { kind: "target_present", targetId: "return_member_record", present: true },
+          ],
+        },
+        "reversible_write",
+        [tokenCondition()],
+      ),
       approval: {
         kind: "user_confirmation",
         summaryTargets: ["email", "phone", "address"],
@@ -906,6 +1195,14 @@ export const meridianUpdateMemberArtifact = build({
         expiresInMs: 120_000,
       },
     },
+    step(
+      "return_to_member_record",
+      "Return to the updated member record",
+      { kind: "click", targetId: "return_member_record" },
+      { kind: "route", pattern: "^/members/[0-9]{6}$" },
+      "read",
+      [{ kind: "target_present", targetId: "return_member_record", present: true }],
+    ),
     { ...step("extract_saved_email", "Read saved email", { kind: "extract", targetId: "email_value", outputName: "email", source: "text" }, { kind: "target_value", targetId: "email_value", operator: "equals", value: { kind: "input", name: "email" }, redactActual: true }), postconditionFailureCode: "SAVED_VALUE_MISMATCH" },
     { ...step("extract_saved_phone", "Read saved phone", { kind: "extract", targetId: "phone_value", outputName: "phone", source: "text" }, { kind: "target_value", targetId: "phone_value", operator: "equals", value: { kind: "input", name: "phone" }, redactActual: true }), postconditionFailureCode: "SAVED_VALUE_MISMATCH" },
     { ...step("extract_saved_address", "Read saved address", { kind: "extract", targetId: "address_value", outputName: "address", source: "text" }, { kind: "target_value", targetId: "address_value", operator: "equals", value: { kind: "input", name: "address" }, redactActual: true }), postconditionFailureCode: "SAVED_VALUE_MISMATCH" },
@@ -932,19 +1229,37 @@ export const meridianPlaceHoldArtifact = build({
     stringInput("reason", "MERIDIAN hold reason code", { type: { kind: "string", enum: ["FRAUD", "LEGAL", "DECEASED"] }, classification: "internal" }),
     stringInput("notes", "Hold notes", { type: { kind: "string", maxLength: 80 }, classification: "restricted" }),
   ],
-  outputs: [],
+  outputs: [
+    { name: "share_status_before", description: "Exact selected-share status captured before the hold", type: { kind: "string", minLength: 1, maxLength: 64 }, classification: "restricted" },
+    { name: "confirmation", description: "MERIDIAN account-hold confirmation reference", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+    { name: "share_status", description: "Share and hold status reported by MERIDIAN", type: { kind: "string", minLength: 1, maxLength: 256, pattern: "^.+ is now HOLD$" }, classification: "restricted" },
+    { name: "applied_at", description: "Timestamp reported by MERIDIAN for the applied hold", type: { kind: "string", minLength: 1, maxLength: 128 }, classification: "internal" },
+  ],
   targets: transactionTargets("hold"),
   inputRelations: [
     { kind: "starts_with_input", value: "share", prefix: "member_number", separator: "-" },
   ],
   steps: [
-    ...transactionPrelude("hold"),
+    ...transactionPrelude("hold", [
+      receiptExtraction("extract_share_status_before", "Read selected share status before hold", "share_status_before", "share_status_before"),
+    ]),
     step("choose_share", "Choose share", { kind: "select", targetId: "share", value: { kind: "input", name: "share" } }, { kind: "target_value", targetId: "share", operator: "equals", value: { kind: "input", name: "share" }, redactActual: true }, "draft"),
     step("choose_reason", "Choose hold reason", { kind: "select", targetId: "reason", value: { kind: "input", name: "reason" } }, { kind: "target_value", targetId: "reason", operator: "equals", value: { kind: "input", name: "reason" }, redactActual: false }, "draft"),
     step("enter_notes", "Enter hold notes", { kind: "fill", targetId: "notes", value: { kind: "input", name: "notes" } }, { kind: "target_value", targetId: "notes", operator: "equals", value: { kind: "input", name: "notes" }, redactActual: true }, "draft"),
     step("review_hold", "Continue to hold review", { kind: "click", targetId: "continue" }, { kind: "route", pattern: "^/members/[0-9]{6}/hold/review$" }, "review", [tokenCondition()]),
     {
-      ...step("commit_hold", "Apply reviewed account hold", { kind: "click", targetId: "commit" }, postCheckpoint("hold"), "irreversible_commit", [tokenCondition()]),
+      ...step(
+        "commit_hold",
+        "Apply reviewed account hold",
+        { kind: "click", targetId: "commit" },
+        postCheckpoint("hold", "Hold Applied - Meridian Core", [
+          "receipt_confirmation",
+          "receipt_share_status",
+          "receipt_applied",
+        ]),
+        "irreversible_commit",
+        [tokenCondition()],
+      ),
       approval: {
         kind: "supervisor_confirmation",
         summaryTargets: ["review_member", "review_share", "review_reason", "review_notes"],
@@ -953,11 +1268,24 @@ export const meridianPlaceHoldArtifact = build({
         expiresInMs: 120_000,
       },
     },
+    receiptExtraction("extract_hold_confirmation", "Read hold confirmation", "receipt_confirmation", "confirmation"),
+    receiptExtraction(
+      "extract_held_share_status",
+      "Read resulting share hold status",
+      "receipt_share_status",
+      "share_status",
+      { kind: "target_value", targetId: "receipt_share_status", operator: "contains", value: { kind: "input", name: "share" }, redactActual: true },
+    ),
+    receiptExtraction("extract_hold_applied_at", "Read hold application time", "receipt_applied", "applied_at"),
   ],
   states: commonStates([
     { code: "HOLD_ALREADY_EXISTS", description: "The requested share already has a hold.", category: "business_outcome", priority: 940, effectCertainty: "not_applied", condition: { kind: "text_visible", text: "A hold already exists on this share.", exact: true } },
   ]),
-  checkpoint: postCheckpoint("hold"),
+  checkpoint: postCheckpoint("hold", "Hold Applied - Meridian Core", [
+    "receipt_confirmation",
+    "receipt_share_status",
+    "receipt_applied",
+  ]),
   allowedActions: ["click", "fill", "select", "extract"],
   maxEffect: "irreversible_commit",
 });

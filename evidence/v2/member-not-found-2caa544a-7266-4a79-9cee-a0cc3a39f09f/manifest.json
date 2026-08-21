@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "runId": "member-not-found-2caa544a-7266-4a79-9cee-a0cc3a39f09f",
+  "createdAt": "2026-08-21T07:26:15.574Z",
+  "metadata": {
+    "evidenceVersion": "v2",
+    "mode": "hosted-meridian-scenario",
+    "scenario": "member-not-found",
+    "status": "verified",
+    "artifactDigests": [
+      "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a"
+    ],
+    "targetProfileDigest": "eab9d160d7b767431005e20eb6cdffd3667f023e67a520de125c9362513674cb",
+    "plannerCallsAllowed": false,
+    "target": "hosted_meridian"
+  },
+  "evidence": [
+    {
+      "id": "f9e2a7c2-c1d8-4195-8669-f1dffb9ba16c",
+      "kind": "screenshot",
+      "path": "screenshots/completion.png",
+      "mimeType": "image/png",
+      "sha256": "dfc04cd50d70997f2c3da83a6c1af9168fa0b895bc783d22d5fa1b6d17017aa1",
+      "bytes": 13751,
+      "createdAt": "2026-08-21T07:26:15.049Z",
+      "masked": true
+    },
+    {
+      "id": "d0eacb95-b721-4a9c-a121-bbcdf5ab2cb9",
+      "kind": "dom",
+      "path": "dom/completion.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "0f74ebb3400fee43af981217c846228df53b36c6f02a3ce4421385e7ccb3af1f",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:15.072Z",
+      "redacted": true
+    },
+    {
+      "id": "4754f5c0-9ca7-4bd9-896b-c01dc469e2be",
+      "kind": "screenshot",
+      "path": "screenshots/business-outcome-member_not_found.png",
+      "mimeType": "image/png",
+      "sha256": "d0bdb6b130ddd4922e8b219069f177920468825864b988b6c24389e86c16c78b",
+      "bytes": 15792,
+      "createdAt": "2026-08-21T07:26:15.500Z",
+      "masked": true
+    },
+    {
+      "id": "c2bfdb17-4aef-4eef-9a70-3689f1dbad88",
+      "kind": "dom",
+      "path": "dom/business-outcome-member_not_found.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "53ea6c111661713f70c29e36b056511443308cb319979fb737b294da301bf3f8",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:15.518Z",
+      "redacted": true
+    },
+    {
+      "id": "800ca53c-1b60-4acb-9009-41bc1a639f5e",
+      "kind": "json",
+      "path": "data/scenario-summary.json",
+      "mimeType": "application/json",
+      "sha256": "2058a5489545f7bfc93a91d034182b4bc6988760ea6f702ae5d5d02de97c83da",
+      "bytes": 346,
+      "createdAt": "2026-08-21T07:26:15.571Z",
+      "redacted": true
+    },
+    {
+      "id": "7c521d68-b732-436a-b642-70e26b2d33ce",
+      "kind": "json",
+      "path": "events.jsonl",
+      "mimeType": "application/x-ndjson; charset=utf-8",
+      "sha256": "702dbfe2db7721de3a29c558fa9e9db12ca245cf895c1d8736154bcc43cab2c1",
+      "bytes": 13394,
+      "createdAt": "2026-08-21T07:26:15.574Z",
+      "redacted": true
+    }
+  ]
+}

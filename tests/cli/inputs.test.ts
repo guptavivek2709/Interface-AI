@@ -16,24 +16,22 @@ describe("CLI invocation inputs", () => {
   });
 
   it("loads the checked-in UTF-8 files used by both Windows shells", async () => {
-    await expect(readInvocationInputs({ inputs: "examples/inputs/discovery.json" })).resolves.toEqual({
-      memberId: "MBR-1001",
-      accountType: "Savings",
-      nickname: "Rainy Day",
-      initialDeposit: "250.00",
+    await expect(readInvocationInputs({ inputs: "examples/inputs/member-balance.json" })).resolves.toEqual({
+      member_number: "100234",
     });
-    await expect(readInvocationInputs({ inputs: "examples/inputs/replay.json" })).resolves.toEqual({
-      memberId: "MBR-1002",
-      accountType: "Money market",
-      nickname: "Future Fund",
-      initialDeposit: "725.50",
+    await expect(readInvocationInputs({ inputs: "examples/inputs/funds-transfer.json" })).resolves.toEqual({
+      member_number: "100234",
+      from_share: "100234-S0001",
+      to_share: "100234-S0070",
+      amount: "1.00",
+      memo: "Capability demo one-dollar transfer",
     });
   });
 
   it("parses repeatable name=value inputs without losing spaces or later equals signs", () => {
-    expect(parseInputAssignments(["memberId=MBR-1001", "nickname=Rainy Day=A"])).toEqual({
-      memberId: "MBR-1001",
-      nickname: "Rainy Day=A",
+    expect(parseInputAssignments(["member_number=100234", "memo=Reviewed amount=1.00"])).toEqual({
+      member_number: "100234",
+      memo: "Reviewed amount=1.00",
     });
   });
 
@@ -53,9 +51,9 @@ describe("CLI invocation inputs", () => {
 
   it("rejects ambiguous sources, duplicates, reserved names, and missing inputs", async () => {
     await expect(
-      readInvocationInputs({ inputs: '{"memberId":"one"}', input: ["memberId=two"] }),
+      readInvocationInputs({ inputs: '{"member_number":"100234"}', input: ["member_number=100987"] }),
     ).rejects.toThrow(/either --inputs/u);
-    expect(() => parseInputAssignments(["memberId=one", "memberId=two"])).toThrow(/more than once/u);
+    expect(() => parseInputAssignments(["member_number=100234", "member_number=100987"])).toThrow(/more than once/u);
     expect(() => parseInputAssignments(["constructor=value"])).toThrow(/Reserved/u);
     expect(() => parseInputAssignments(["bad name=value"])).toThrow(/Invalid input name/u);
     await expect(readInvocationInputs({})).rejects.toThrow(/Inputs are required/u);
@@ -63,7 +61,7 @@ describe("CLI invocation inputs", () => {
   });
 
   it("turns malformed JSON into an actionable Windows-safe error", async () => {
-    await expect(readInvocationInputs({ inputs: "{memberId:MBR-1001}" })).rejects.toThrow(
+    await expect(readInvocationInputs({ inputs: "{member_number:100234}" })).rejects.toThrow(
       /On Windows, prefer a JSON file or repeat --input/u,
     );
   });

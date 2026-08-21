@@ -1,0 +1,1541 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "share.open",
+    "name": "Open new share",
+    "description": "Open a new member share through review and an approval-bound final post.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "irreversible",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T06:11:54.948Z",
+    "goal": "Follow exactly this safe, non-persistent sequence, one UI action per turn: click Main Menu; click Member Inquiry / Selection; select search mode number as a literal; fill the member search field from {{member_number}}; click Search; click the exact Select control in the result row bound to {{member_number}}; extract the complete table with headers Share ID, Type, Balance, Status as shares_before with table output type; click Open New Share; select the new share type from {{share_type}}; fill the initial deposit from {{initial_deposit}}; click Continue. Then STOP and finish only when the CONFIRM NEW SHARE heading is visible on the review page before opening. Never click Open Share. Extract exactly shares_before, with no other outputs.",
+    "discoveryRunId": "discovery.07daccef-6ab7-43e9-81ab-932d657597f4",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "member_number",
+      "description": "Six-digit MERIDIAN member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number",
+        "minLength": 6,
+        "maxLength": 6,
+        "pattern": "^[0-9]{6}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "share_type",
+      "description": "Stable MERIDIAN share type code",
+      "type": {
+        "kind": "string",
+        "enum": [
+          "S0001",
+          "S0070",
+          "MMKT",
+          "CERT"
+        ]
+      },
+      "required": true,
+      "classification": "internal"
+    },
+    {
+      "name": "initial_deposit",
+      "description": "USD initial deposit",
+      "type": {
+        "kind": "money",
+        "currency": "USD",
+        "minimumMinorUnits": 1
+      },
+      "required": true,
+      "classification": "restricted"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "shares_before",
+      "description": "Complete share set captured before opening a new share",
+      "type": {
+        "kind": "array",
+        "items": {
+          "kind": "object",
+          "properties": {
+            "share_id": {
+              "kind": "string",
+              "format": "share_id"
+            },
+            "type": {
+              "kind": "string"
+            },
+            "balance": {
+              "kind": "money",
+              "currency": "USD"
+            },
+            "status": {
+              "kind": "string"
+            }
+          },
+          "required": [
+            "share_id",
+            "type",
+            "balance",
+            "status"
+          ]
+        },
+        "maxItems": 100
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "confirmation",
+      "description": "MERIDIAN new-share confirmation reference",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    },
+    {
+      "name": "new_share_id",
+      "description": "Stable ID assigned to the newly opened share",
+      "type": {
+        "kind": "string",
+        "format": "share_id",
+        "pattern": "^[0-9]{6}-[A-Z0-9-]{5,20}$"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "share_type",
+      "description": "Display type confirmed by MERIDIAN for the opened share",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    },
+    {
+      "name": "opening_balance",
+      "description": "Opening balance confirmed by MERIDIAN",
+      "type": {
+        "kind": "money",
+        "currency": "USD",
+        "minimumMinorUnits": 1
+      },
+      "classification": "restricted"
+    }
+  ],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract",
+      "extract_table"
+    ],
+    "maxEffect": "irreversible_commit",
+    "inputRelations": []
+  },
+  "targets": [
+    {
+      "id": "main_menu",
+      "description": "Return to the authenticated main menu from the persistent navigation region",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "member_inquiry",
+      "description": "Open member inquiry from the main menu",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_by",
+      "description": "Member inquiry search mode",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_value",
+      "description": "Member inquiry search value",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "search",
+      "description": "Submit member inquiry",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "select_member",
+      "description": "Select the result row for the exact requested member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "member_number_value",
+      "description": "Selected member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member No.:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "shares_table",
+      "description": "Selected member shares and balances",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ]
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "transaction_token",
+      "description": "Current form anti-replay token",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "_token"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "maintenance_continue",
+      "description": "Leave the declared maintenance interstitial",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "open_transaction",
+      "description": "Open new share form",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Open New Share",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "share_type",
+      "description": "New share type",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "type"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "deposit",
+      "description": "Initial deposit",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "deposit"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "continue",
+      "description": "Review new share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "commit",
+      "description": "Final new-share commit",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Open Share",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "review_member",
+      "description": "Reviewed member",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_type",
+      "description": "Reviewed share type",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Share Type:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "review_deposit",
+      "description": "Reviewed initial deposit",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Initial Deposit:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_confirmation",
+      "description": "Opened-share confirmation reference",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Confirmation:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "receipt_new_share_id",
+      "description": "Newly opened share ID",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "New Share ID:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_share_type",
+      "description": "Opened share type",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Type:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "receipt_opening_balance",
+      "description": "Opened share balance",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Opening Balance:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.main-menu.3d7b9eb009c7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.member-inquiry-selection.4c3bde628cc7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.by.dd66fd31806d",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Member Number Last Name",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.q.0238afec13dd",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "q",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.search.ff721a99805c",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.select-member-no-member-number.fea711bd9f27",
+      "description": "Observed table row control target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.share-id-type-balance-status.ddfc36bd018f",
+      "description": "Observed table target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ]
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.open-new-share.ac3af2e117a9",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Open New Share",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Open New Share",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.type.238267d9a928",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "type"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.deposit.89f26561b9ab",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "deposit",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "deposit"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.continue.ced01f371e05",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.main-menu.3d7b9eb009c7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.main-menu.3d7b9eb009c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-inquiry-selection.4c3bde628cc7",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.002.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.member-inquiry-selection.4c3bde628cc7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-inquiry-selection.4c3bde628cc7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER INQUIRY / SELECTION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.by.dd66fd31806d",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.by.dd66fd31806d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.by.dd66fd31806d",
+        "operator": "equals",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.004.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.q.0238afec13dd",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.q.0238afec13dd",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.q.0238afec13dd",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.005.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.search.ff721a99805c"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.search.ff721a99805c",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.006.click",
+      "title": "click Observed table row control target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.select-member-no-member-number.fea711bd9f27",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER RECORD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.007.extract",
+      "title": "extract Observed table target used during discovery.",
+      "action": {
+        "kind": "extract_table",
+        "targetId": "target.share-id-type-balance-status.ddfc36bd018f",
+        "outputName": "shares_before",
+        "columns": [
+          {
+            "header": "Share ID",
+            "key": "share_id",
+            "type": {
+              "kind": "string",
+              "format": "share_id"
+            },
+            "classification": "restricted"
+          },
+          {
+            "header": "Type",
+            "key": "type",
+            "type": {
+              "kind": "string"
+            },
+            "classification": "internal"
+          },
+          {
+            "header": "Balance",
+            "key": "balance",
+            "type": {
+              "kind": "money",
+              "currency": "USD"
+            },
+            "classification": "restricted"
+          },
+          {
+            "header": "Status",
+            "key": "status",
+            "type": {
+              "kind": "string"
+            },
+            "classification": "internal"
+          }
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.share-id-type-balance-status.ddfc36bd018f",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.share-id-type-balance-status.ddfc36bd018f",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.008.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.open-new-share.ac3af2e117a9"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.open-new-share.ac3af2e117a9",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "OPEN NEW SHARE",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.009.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.type.238267d9a928",
+        "value": {
+          "kind": "input",
+          "name": "share_type"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.type.238267d9a928",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.type.238267d9a928",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "share_type"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.010.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.deposit.89f26561b9ab",
+        "value": {
+          "kind": "input",
+          "name": "initial_deposit"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.deposit.89f26561b9ab",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.deposit.89f26561b9ab",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "initial_deposit"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "review_new_share",
+      "title": "Continue to new-share review",
+      "action": {
+        "kind": "click",
+        "targetId": "continue"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/open-share/review$"
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "review"
+    },
+    {
+      "id": "commit_new_share",
+      "title": "Open reviewed share",
+      "action": {
+        "kind": "click",
+        "targetId": "commit"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "route",
+            "pattern": "^/members/[0-9]{6}/open-share/post$"
+          },
+          {
+            "kind": "http_status",
+            "status": 200
+          },
+          {
+            "kind": "page_title",
+            "title": "Share Opened - Meridian Core",
+            "exact": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_confirmation",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_new_share_id",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_share_type",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_opening_balance",
+            "present": true
+          }
+        ]
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "irreversible_commit",
+      "approval": {
+        "kind": "user_confirmation",
+        "summaryTargets": [
+          "review_member",
+          "review_type",
+          "review_deposit"
+        ],
+        "summarySources": {},
+        "stateNonceTarget": "transaction_token",
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "id": "extract_open_share_confirmation",
+      "title": "Read new-share confirmation",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_confirmation",
+        "outputName": "confirmation",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_new_share_id",
+      "title": "Read the assigned share ID",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_new_share_id",
+        "outputName": "new_share_id",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_new_share_id",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_opened_share_type",
+      "title": "Read the opened share type",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_share_type",
+        "outputName": "share_type",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_share_type",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_opening_balance",
+      "title": "Read the opening balance",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_opening_balance",
+        "outputName": "opening_balance",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "receipt_opening_balance",
+        "operator": "contains",
+        "value": {
+          "kind": "input",
+          "name": "initial_deposit"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "The MERIDIAN session expired; sign on again before retrying from the beginning.",
+      "category": "intervention",
+      "priority": 1000,
+      "condition": {
+        "kind": "http_status",
+        "status": 440
+      },
+      "effectCertainty": "not_applied",
+      "handoff": {
+        "kind": "same_session",
+        "action": "restore_session",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "code": "SUPERVISOR_REQUIRED",
+      "description": "This operation requires a separately authenticated supervisor session.",
+      "category": "intervention",
+      "priority": 990,
+      "condition": {
+        "kind": "http_status",
+        "status": 403
+      },
+      "effectCertainty": "not_applied",
+      "requiredRole": "supervisor",
+      "handoff": {
+        "kind": "same_session",
+        "action": "authenticate_supervisor",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000,
+        "trigger": {
+          "kind": "capability_role",
+          "role": "supervisor"
+        }
+      }
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "MAINTENANCE",
+      "description": "MERIDIAN entered its declared maintenance interstitial; return to the menu and restart safely.",
+      "category": "recoverable",
+      "priority": 960,
+      "condition": {
+        "kind": "http_status",
+        "status": 503
+      },
+      "recovery": {
+        "kind": "restart_run",
+        "action": {
+          "kind": "click",
+          "targetId": "maintenance_continue"
+        },
+        "maxAttempts": 1,
+        "waitMs": 0
+      }
+    },
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "description": "The browser is no longer authenticated; establish a new secure session.",
+      "category": "escalation",
+      "priority": 950,
+      "condition": {
+        "kind": "text_visible",
+        "text": "OPERATOR SIGN ON",
+        "exact": true
+      }
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/open-share/post$"
+      },
+      {
+        "kind": "http_status",
+        "status": 200
+      },
+      {
+        "kind": "page_title",
+        "title": "Share Opened - Meridian Core",
+        "exact": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_new_share_id",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_share_type",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_opening_balance",
+        "present": true
+      }
+    ]
+  }
+}

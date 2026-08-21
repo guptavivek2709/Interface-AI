@@ -142,8 +142,117 @@ describe("AnthropicChatRouter", () => {
           additionalProperties: false,
         }),
       }),
+      expect.objectContaining({
+        name: "propose_capability_sequence",
+        strict: true,
+        input_schema: expect.objectContaining({
+          type: "object",
+          additionalProperties: false,
+        }),
+      }),
     ]);
     expect(body["system"]).toEqual(expect.stringContaining("Never approve or confirm"));
+  });
+
+  it.each([
+    {
+      type: "thinking",
+      thinking: "private provider reasoning",
+      signature: "signed-thinking-block",
+    },
+    {
+      type: "redacted_thinking",
+      data: "opaque-encrypted-thinking-block",
+    },
+  ])("discards a valid $type block before a tool route", async (privateBlock) => {
+    const fake = fakeClient(
+      message({
+        stop_reason: "tool_use",
+        content: [
+          privateBlock,
+          {
+            type: "tool_use",
+            id: "toolu_balance_private_reasoning",
+            name: "member_get_balance",
+            input: { memberId: "100234" },
+            caller: { type: "direct" },
+          },
+        ],
+      }),
+    );
+
+    const result = await new AnthropicChatRouter({ client: fake.client }).route(request());
+
+    expect(result).toMatchObject({
+      kind: "invoke",
+      capabilityId: "member.get_record_balance",
+      arguments: { memberId: "100234" },
+    });
+    expect(JSON.stringify(result)).not.toContain("private provider reasoning");
+    expect(JSON.stringify(result)).not.toContain("opaque-encrypted-thinking-block");
+  });
+
+  it("accepts one strict typed sequence proposal and validates its prior-result binding locally", async () => {
+    const searchTool: ChatToolDefinition = {
+      name: "member_search",
+      capabilityId: "member.search",
+      capabilityVersion: "2.0.0",
+      description: "Find member candidates by last name.",
+      inputSchema: z.strictObject({ lastName: z.string().min(1) }),
+      outputSchema: z.strictObject({
+        candidates: z.array(z.strictObject({ memberId: z.string().regex(/^\d{6}$/u) })),
+      }),
+    };
+    const fake = fakeClient(message({
+      stop_reason: "tool_use",
+      content: [{
+        type: "tool_use",
+        id: "toolu_sequence_1",
+        name: "propose_capability_sequence",
+        caller: { type: "direct" },
+        input: {
+          steps: [
+            {
+              stepId: "search",
+              toolName: "member_search",
+              literalArgumentsJson: '{"lastName":"Example"}',
+              bindings: [],
+            },
+            {
+              stepId: "balances",
+              toolName: "member_get_balance",
+              literalArgumentsJson: "{}",
+              bindings: [{
+                sourceStepId: "search",
+                sourceCollectionPath: ["candidates"],
+                valuePath: ["memberId"],
+                targetInput: "memberId",
+                selection: "exactly_one",
+                onZero: "stop_no_match",
+                onMany: "pause_for_authenticated_selection",
+              }],
+            },
+          ],
+        },
+      }],
+    }));
+    const result = await new AnthropicChatRouter({ client: fake.client }).route(request({
+      message: "Find Example and show the unique balance",
+      tools: [searchTool, BALANCE_TOOL],
+    }));
+    expect(result).toMatchObject({
+      kind: "sequence",
+      failurePolicy: "stop_on_non_success",
+      steps: [
+        { stepId: "search", capabilityId: "member.search", literalArguments: { lastName: "Example" } },
+        {
+          stepId: "balances",
+          capabilityId: "member.get_record_balance",
+          literalArguments: {},
+          bindings: [{ targetInput: "memberId", sourceStepId: "search" }],
+        },
+      ],
+    });
   });
 
   it("sends only the transformed provider schema and explicit SDK lifecycle options", async () => {
@@ -388,9 +497,10 @@ describe("AnthropicChatRouter", () => {
     }
   });
 
-  it("honors timeout and effort environment configuration", async () => {
+  it("honors timeout, effort, and output-budget environment configuration", async () => {
     vi.stubEnv("ANTHROPIC_CHAT_TIMEOUT_MS", "4321");
     vi.stubEnv("ANTHROPIC_CHAT_EFFORT", "high");
+    vi.stubEnv("ANTHROPIC_CHAT_MAX_TOKENS", "3072");
     const fake = fakeClient(message());
     const router = new AnthropicChatRouter({ client: fake.client });
 
@@ -399,6 +509,7 @@ describe("AnthropicChatRouter", () => {
     const body = fake.create.mock.calls[0]![0] as Record<string, unknown>;
     const options = fake.create.mock.calls[0]![1] as Record<string, unknown>;
     expect(body["output_config"]).toEqual({ effort: "high" });
+    expect(body["max_tokens"]).toBe(3_072);
     expect(options["timeout"]).toBe(4_321);
   });
 

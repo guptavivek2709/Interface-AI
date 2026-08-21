@@ -26,11 +26,24 @@ export interface RunJournalEntryV2 {
 
 export interface RunIncidentV2 {
   code: string;
-  category: "recoverable" | "failure" | "escalation";
+  category: "recoverable" | "failure" | "escalation" | "intervention";
   message: string;
   stepId?: string;
   occurredAt: string;
   recoveryAttempt?: number;
+}
+
+export interface HumanInterventionV2 {
+  interventionId: string;
+  runId: string;
+  stepId: string;
+  reasonCode: string;
+  action: "restore_session" | "authenticate_supervisor";
+  requiredRole?: string;
+  state: "awaiting_human" | "human_active" | "action_completed" | "revalidating";
+  createdAt: string;
+  expiresAt: string;
+  sameLiveSession: true;
 }
 
 export interface ApprovalSummaryItemV2 {
@@ -56,6 +69,8 @@ interface RunResultBaseV2 {
   capabilityId: string;
   capabilityVersion: string;
   artifactDigest: string;
+  /** Deployment profile bound independently from the reusable vendor artifact. */
+  targetProfileDigest?: string;
   inputDigest: string;
   sessionRef: string;
   startedAt: string;
@@ -75,6 +90,8 @@ export type TerminalRunResultV2 =
       retryable: boolean;
       stepId?: string;
       effectUncertain: boolean;
+      /** Typed, already-extracted pre-commit markers available only for read-only reconciliation. */
+      reconciliationOutputs?: Record<string, RunValueV2>;
     })
   | (RunResultBaseV2 & {
       status: "escalation";
@@ -89,6 +106,13 @@ export type ReplayProgressV2 =
       status: "awaiting_approval";
       phase: "awaiting_approval";
       challenge: ApprovalChallengeV2;
+      journal: RunJournalEntryV2[];
+      incidents: RunIncidentV2[];
+    }
+  | {
+      status: "awaiting_human";
+      phase: "awaiting_human";
+      intervention: HumanInterventionV2;
       journal: RunJournalEntryV2[];
       incidents: RunIncidentV2[];
     }

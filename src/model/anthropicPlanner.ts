@@ -74,7 +74,7 @@ export class AnthropicPlanner implements Planner {
 
     const apiKey = options?.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!apiKey?.trim()) {
-      throw new Error("ANTHROPIC_API_KEY is required for --planner anthropic");
+      throw new Error("ANTHROPIC_API_KEY is required for model discovery");
     }
     this.#client = new Anthropic({
       apiKey,

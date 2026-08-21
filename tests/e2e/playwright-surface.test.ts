@@ -36,6 +36,8 @@ async function startFixtureServer(): Promise<FixtureServer> {
       response.writeHead(207, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html>
         <html><head><title>Legacy controls</title></head><body>
+          <table><tr><td><a href="/menu">Main Menu</a> <a href="/members">Member Inquiry</a></td></tr></table>
+          <p><a href="/wrong-menu">Main Menu</a></p>
           <label for="operator-password">Operator password</label>
           <input id="operator-password" name="operatorPassword" type="password" value="PASSWORD_CANARY_8371">
           <label for="member-number">Member number</label>
@@ -54,10 +56,11 @@ async function startFixtureServer(): Promise<FixtureServer> {
              <option value="WEST-014">West Office</option>
            </select>
            <table>
-             <tr><th>Share ID</th><th>Type</th><th>Balance</th><th>Status</th></tr>
-             <tr><td>100234-S0001</td><td>Checking</td><td>$1,234.56</td><td>OPEN</td></tr>
-             <tr><td>100234-S0070</td><td>Savings</td><td>USD 25.00</td><td>HOLD</td></tr>
+             <tr><th>Share ID</th><th>Type</th><th>Balance</th><th>Status</th><th>Action</th></tr>
+             <tr><td>100234-S0001</td><td>Checking</td><td>$1,234.56</td><td>OPEN</td><td><a href="/selected?share=100234-S0001">Select</a></td></tr>
+             <tr><td>100234-S0070</td><td>Savings</td><td>USD 25.00</td><td>HOLD</td><td><a href="/selected?share=100234-S0070">Select</a></td></tr>
            </table>
+           <table><tr><th scope="row">Member name</th><td>Alex Example</td></tr></table>
            <table>
              <tr><th>Duplicate</th><th>Duplicate</th></tr>
              <tr><td>first</td><td>second</td></tr>
@@ -72,14 +75,30 @@ async function startFixtureServer(): Promise<FixtureServer> {
       response.end();
       return;
     }
+    if (requestUrl.pathname === "/menu") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Main menu</title><h1>Main menu</h1>");
+      return;
+    }
     if (requestUrl.pathname === "/result") {
       response.writeHead(422, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><title>Search rejected</title><h1>Search rejected</h1>");
       return;
     }
+    if (requestUrl.pathname === "/slow-result") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.write("<!doctype html><html><head><title>Loading result</title></head><body>");
+      setTimeout(() => response.end("<h1>Stable result</h1></body></html>"), 75);
+      return;
+    }
     if (requestUrl.pathname === "/frame") {
       response.writeHead(418, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><title>Frame response</title><p>Frame response</p>");
+      return;
+    }
+    if (requestUrl.pathname === "/selected") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html><title>Selected share</title><h1>Selected ${requestUrl.searchParams.get("share") ?? ""}</h1>`);
       return;
     }
     if (requestUrl.pathname === "/asset") {
@@ -161,6 +180,31 @@ describe("PlaywrightSurface legacy HTML semantics", () => {
     ).rejects.toThrow(/did not match exactly one option/u);
   });
 
+  it("uses an exact reviewed fallback when an earlier locator strategy is ambiguous", async () => {
+    const navigationTarget: TargetV2 = {
+      id: "main-menu",
+      description: "Persistent navigation link",
+      framePath: [],
+      strategies: [
+        { kind: "role", role: "link", name: "Main Menu", exact: true },
+        { kind: "navigation_link", name: "Main Menu", exact: true, companionText: "Member Inquiry" },
+      ],
+      cardinality: "exactly_one",
+      sensitive: false,
+    };
+    const runtime = new PlaywrightReplayRuntimeV2(surface!, { targets: [navigationTarget] });
+    const receipt = await runtime.act(
+      { kind: "click", targetId: "main-menu" },
+      { inputs: {}, bindings: {} },
+    );
+    expect(receipt.strategy).toBe("navigation_link");
+    expect(receipt.attempts).toEqual([
+      expect.objectContaining({ strategy: "role", count: 2 }),
+      expect.objectContaining({ strategy: "navigation_link", count: 1 }),
+    ]);
+    expect(new URL(surface!.page.url()).pathname).toBe("/menu");
+  });
+
   it("tracks the latest main-document status without accepting frame or asset statuses", async () => {
     const initial = await surface!.observe();
     expect(initial.httpStatus).toBe(207);
@@ -229,6 +273,103 @@ describe("PlaywrightSurface legacy HTML semantics", () => {
     }, context)).rejects.toThrow(/duplicate header/u);
   });
 
+  it("observes and resolves label-value, table, and input-keyed row semantics", async () => {
+    const observation = await surface!.observe({ share_id: "100234-S0070" });
+    const labelValue = observation.semanticTargets?.find(
+      (target) => target.kind === "label_value" && target.label === "Member name",
+    );
+    const table = observation.semanticTargets?.find(
+      (target) => target.kind === "table" && target.headers.includes("Share ID"),
+    );
+    const rowControl = observation.semanticTargets?.find(
+      (target) => target.kind === "table_row_control" && target.keyInputName === "share_id",
+    );
+    const rowValue = observation.semanticTargets?.find(
+      (target) =>
+        target.kind === "table_row_value" &&
+        target.keyInputName === "share_id" &&
+        target.valueColumn === "Status",
+    );
+    expect(labelValue).toEqual(expect.objectContaining({ valueCellOffset: 1 }));
+    expect(table).toEqual(
+      expect.objectContaining({ headers: ["Share ID", "Type", "Balance", "Status", "Action"] }),
+    );
+    expect(rowControl).toEqual(
+      expect.objectContaining({
+        keyColumn: "Share ID",
+        controlRole: "link",
+        controlName: "Select",
+      }),
+    );
+    expect(rowValue).toEqual(
+      expect.objectContaining({
+        keyColumn: "Share ID",
+        valueColumn: "Status",
+      }),
+    );
+    expect(JSON.stringify(rowControl)).not.toContain("100234-S0070");
+    expect(JSON.stringify(rowValue)).not.toContain("100234-S0070");
+
+    const scalar = await surface!.actFromObservation(
+      {
+        kind: "extract",
+        targetRef: labelValue!.ref,
+        value: null,
+        outputName: "member_name",
+        outputType: "string",
+        key: null,
+      },
+      observation,
+      { share_id: "100234-S0070" },
+    );
+    expect(scalar.observedValue).toBe("Alex Example");
+
+    const rows = await surface!.actFromObservation(
+      {
+        kind: "extract",
+        targetRef: table!.ref,
+        value: null,
+        outputName: "shares",
+        outputType: "table",
+        key: null,
+      },
+      observation,
+      { share_id: "100234-S0070" },
+    );
+    expect(JSON.parse(rows.observedValue ?? "[]")).toEqual([
+      expect.objectContaining({ "Share ID": "100234-S0001", Status: "OPEN" }),
+      expect.objectContaining({ "Share ID": "100234-S0070", Status: "HOLD" }),
+    ]);
+
+    const status = await surface!.actFromObservation(
+      {
+        kind: "extract",
+        targetRef: rowValue!.ref,
+        value: null,
+        outputName: "share_status",
+        outputType: "string",
+        key: null,
+      },
+      observation,
+      { share_id: "100234-S0070" },
+    );
+    expect(status.observedValue).toBe("HOLD");
+
+    await surface!.actFromObservation(
+      {
+        kind: "click",
+        targetRef: rowControl!.ref,
+        value: null,
+        outputName: null,
+        outputType: null,
+        key: null,
+      },
+      observation,
+      { share_id: "100234-S0070" },
+    );
+    expect(new URL(surface!.page.url()).searchParams.get("share")).toBe("100234-S0070");
+  });
+
   it("lets an adapter redact path and query identifiers from observations and DOM evidence", async () => {
     await surface!.close();
     surface = new PlaywrightSurface({
@@ -246,5 +387,12 @@ describe("PlaywrightSurface legacy HTML semantics", () => {
     expect(JSON.stringify(observation)).not.toContain("PII_CANARY_100234");
     expect(dom).not.toContain("PII_CANARY_100234");
     expect(dom).not.toContain("private-fragment");
+  });
+
+  it("reacquires the main document when evidence capture begins during navigation", async () => {
+    await surface!.page.goto(`${fixture!.baseUrl}/slow-result`, { waitUntil: "commit" });
+    const dom = await surface!.domSnapshot();
+    expect(dom).toContain("Stable result");
+    expect(dom).not.toContain("detached frame");
   });
 });

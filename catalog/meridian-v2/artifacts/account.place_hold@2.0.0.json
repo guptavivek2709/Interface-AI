@@ -1,0 +1,1566 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "account.place_hold",
+    "name": "Place account hold",
+    "description": "Place a supervisor-only share hold through review and an approval-bound final post.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "supervisor_only",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T06:08:33.853Z",
+    "goal": "Perform these numbered actions in this exact order, without skipping any action even when the current page already appears to be the destination: (1) FIRST click the visible Main Menu link; (2) SECOND click Member Inquiry; (3) select Member Number mode; (4) fill {{member_number}}; (5) click Search; (6) select the exact member row keyed by {{member_number}}; (7) extract the Status cell for the row keyed by {{share}} as output share_status_before using that exact output name; (8) click Place Account Hold; (9) select Share from {{share}}; (10) select Reason from {{reason}}; (11) fill Notes from {{notes}}; (12) click Continue exactly once; (13) finish on the account-hold review heading. Never click Apply Hold, Save, Confirm, Post, or any final commit control.",
+    "discoveryRunId": "discovery.5d8a7d98-4fa3-4000-ba55-9ce5ea31dc6b",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "member_number",
+      "description": "Six-digit MERIDIAN member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number",
+        "minLength": 6,
+        "maxLength": 6,
+        "pattern": "^[0-9]{6}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "share",
+      "description": "Stable share ID to hold",
+      "type": {
+        "kind": "string",
+        "format": "share_id",
+        "pattern": "^[0-9]{6}-[A-Z0-9-]{5,20}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "reason",
+      "description": "MERIDIAN hold reason code",
+      "type": {
+        "kind": "string",
+        "enum": [
+          "FRAUD",
+          "LEGAL",
+          "DECEASED"
+        ]
+      },
+      "required": true,
+      "classification": "internal"
+    },
+    {
+      "name": "notes",
+      "description": "Hold notes",
+      "type": {
+        "kind": "string",
+        "maxLength": 80
+      },
+      "required": true,
+      "classification": "restricted"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "share_status_before",
+      "description": "Exact selected-share status captured before the hold",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "confirmation",
+      "description": "MERIDIAN account-hold confirmation reference",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    },
+    {
+      "name": "share_status",
+      "description": "Share and hold status reported by MERIDIAN",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^.+ is now HOLD$"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "applied_at",
+      "description": "Timestamp reported by MERIDIAN for the applied hold",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    }
+  ],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract"
+    ],
+    "maxEffect": "irreversible_commit",
+    "inputRelations": [
+      {
+        "kind": "starts_with_input",
+        "value": "share",
+        "prefix": "member_number",
+        "separator": "-"
+      }
+    ]
+  },
+  "targets": [
+    {
+      "id": "main_menu",
+      "description": "Return to the authenticated main menu from the persistent navigation region",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "member_inquiry",
+      "description": "Open member inquiry from the main menu",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_by",
+      "description": "Member inquiry search mode",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_value",
+      "description": "Member inquiry search value",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "search",
+      "description": "Submit member inquiry",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "select_member",
+      "description": "Select the result row for the exact requested member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "member_number_value",
+      "description": "Selected member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member No.:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "shares_table",
+      "description": "Selected member shares and balances",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ]
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "transaction_token",
+      "description": "Current form anti-replay token",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "_token"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "maintenance_continue",
+      "description": "Leave the declared maintenance interstitial",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "open_transaction",
+      "description": "Open account hold form",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Place Account Hold",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "share_status_before",
+      "description": "Selected share status before the hold",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "share"
+          },
+          "valueColumn": "Status"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "share",
+      "description": "Share to hold",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "share"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "reason",
+      "description": "Hold reason code",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "reason"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "notes",
+      "description": "Hold notes",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "notes"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "continue",
+      "description": "Review account hold",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "commit",
+      "description": "Final account-hold commit",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Apply Hold",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "review_member",
+      "description": "Reviewed member",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_share",
+      "description": "Reviewed share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Share:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_reason",
+      "description": "Reviewed hold reason",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Reason:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "review_notes",
+      "description": "Reviewed hold notes",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Notes:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_confirmation",
+      "description": "Applied-hold confirmation reference",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Confirmation:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "receipt_share_status",
+      "description": "Share status reported after the hold",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Share:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_applied",
+      "description": "Applied-hold timestamp",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Applied:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.main-menu.3d7b9eb009c7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.member-inquiry.b5bedd0e025a",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Member Inquiry",
+          "exact": true
+        },
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.by.dd66fd31806d",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Member Number Last Name",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.q.0238afec13dd",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "q",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.search.ff721a99805c",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.select-member-no-member-number.fea711bd9f27",
+      "description": "Observed table row control target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.status-share-id-share.15572e2fc7af",
+      "description": "Observed table row value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "share"
+          },
+          "valueColumn": "Status"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.place-account-hold.8559bb17a46a",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Place Account Hold",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Place Account Hold",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.share.7a8dee1d56e0",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "share"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.reason.6183c693a0c9",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "reason"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.notes.d288acf75661",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "notes",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "notes"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.continue.ced01f371e05",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.main-menu.3d7b9eb009c7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.main-menu.3d7b9eb009c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-inquiry.b5bedd0e025a",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.002.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.member-inquiry.b5bedd0e025a"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-inquiry.b5bedd0e025a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER INQUIRY / SELECTION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.by.dd66fd31806d",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.by.dd66fd31806d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.by.dd66fd31806d",
+        "operator": "equals",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.004.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.q.0238afec13dd",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.q.0238afec13dd",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.q.0238afec13dd",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.005.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.search.ff721a99805c"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.search.ff721a99805c",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.006.click",
+      "title": "click Observed table row control target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.select-member-no-member-number.fea711bd9f27",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER RECORD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.007.extract",
+      "title": "extract Observed table row value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.status-share-id-share.15572e2fc7af",
+        "outputName": "share_status_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.status-share-id-share.15572e2fc7af",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.status-share-id-share.15572e2fc7af",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.008.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.place-account-hold.8559bb17a46a"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.place-account-hold.8559bb17a46a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "PLACE ACCOUNT HOLD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.009.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.share.7a8dee1d56e0",
+        "value": {
+          "kind": "input",
+          "name": "share"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.share.7a8dee1d56e0",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.share.7a8dee1d56e0",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "share"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.010.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.reason.6183c693a0c9",
+        "value": {
+          "kind": "input",
+          "name": "reason"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.reason.6183c693a0c9",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.reason.6183c693a0c9",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "reason"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.011.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.notes.d288acf75661",
+        "value": {
+          "kind": "input",
+          "name": "notes"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.notes.d288acf75661",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.notes.d288acf75661",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "notes"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "review_hold",
+      "title": "Continue to hold review",
+      "action": {
+        "kind": "click",
+        "targetId": "continue"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/hold/review$"
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "review"
+    },
+    {
+      "id": "commit_hold",
+      "title": "Apply reviewed account hold",
+      "action": {
+        "kind": "click",
+        "targetId": "commit"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "route",
+            "pattern": "^/members/[0-9]{6}/hold/post$"
+          },
+          {
+            "kind": "http_status",
+            "status": 200
+          },
+          {
+            "kind": "page_title",
+            "title": "Hold Applied - Meridian Core",
+            "exact": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_confirmation",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_share_status",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_applied",
+            "present": true
+          }
+        ]
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "irreversible_commit",
+      "approval": {
+        "kind": "supervisor_confirmation",
+        "summaryTargets": [
+          "review_member",
+          "review_share",
+          "review_reason",
+          "review_notes"
+        ],
+        "summarySources": {},
+        "stateNonceTarget": "transaction_token",
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "id": "extract_hold_confirmation",
+      "title": "Read hold confirmation",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_confirmation",
+        "outputName": "confirmation",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_held_share_status",
+      "title": "Read resulting share hold status",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_share_status",
+        "outputName": "share_status",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "receipt_share_status",
+        "operator": "contains",
+        "value": {
+          "kind": "input",
+          "name": "share"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_hold_applied_at",
+      "title": "Read hold application time",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_applied",
+        "outputName": "applied_at",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_applied",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "The MERIDIAN session expired; sign on again before retrying from the beginning.",
+      "category": "intervention",
+      "priority": 1000,
+      "condition": {
+        "kind": "http_status",
+        "status": 440
+      },
+      "effectCertainty": "not_applied",
+      "handoff": {
+        "kind": "same_session",
+        "action": "restore_session",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "code": "SUPERVISOR_REQUIRED",
+      "description": "This operation requires a separately authenticated supervisor session.",
+      "category": "intervention",
+      "priority": 990,
+      "condition": {
+        "kind": "http_status",
+        "status": 403
+      },
+      "effectCertainty": "not_applied",
+      "requiredRole": "supervisor",
+      "handoff": {
+        "kind": "same_session",
+        "action": "authenticate_supervisor",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000,
+        "trigger": {
+          "kind": "capability_role",
+          "role": "supervisor"
+        }
+      }
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "MAINTENANCE",
+      "description": "MERIDIAN entered its declared maintenance interstitial; return to the menu and restart safely.",
+      "category": "recoverable",
+      "priority": 960,
+      "condition": {
+        "kind": "http_status",
+        "status": 503
+      },
+      "recovery": {
+        "kind": "restart_run",
+        "action": {
+          "kind": "click",
+          "targetId": "maintenance_continue"
+        },
+        "maxAttempts": 1,
+        "waitMs": 0
+      }
+    },
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "description": "The browser is no longer authenticated; establish a new secure session.",
+      "category": "escalation",
+      "priority": 950,
+      "condition": {
+        "kind": "text_visible",
+        "text": "OPERATOR SIGN ON",
+        "exact": true
+      }
+    },
+    {
+      "code": "HOLD_ALREADY_EXISTS",
+      "description": "The requested share already has a hold.",
+      "category": "business_outcome",
+      "priority": 940,
+      "condition": {
+        "kind": "text_visible",
+        "text": "A hold already exists on this share.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/hold/post$"
+      },
+      {
+        "kind": "http_status",
+        "status": 200
+      },
+      {
+        "kind": "page_title",
+        "title": "Hold Applied - Meridian Core",
+        "exact": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_share_status",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_applied",
+        "present": true
+      }
+    ]
+  }
+}

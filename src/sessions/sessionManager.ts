@@ -132,6 +132,38 @@ export class SessionManager<T extends SessionResource> {
     return this.#snapshot(record);
   }
 
+  rebindPrincipal(
+    sessionRef: string,
+    runId: string,
+    expected: SessionPrincipal,
+    replacement: SessionPrincipal,
+  ): SessionSnapshot {
+    const record = this.#required(sessionRef);
+    if (
+      record.state !== "busy" ||
+      record.activeRunId !== runId ||
+      !record.principal
+    ) {
+      throw new SessionManagerError(
+        "SESSION_NOT_ACTIVE",
+        "Only the run holding the live session lease may rebind its principal",
+      );
+    }
+    if (
+      record.principal.operatorId !== expected.operatorId ||
+      record.principal.role !== expected.role ||
+      record.principal.branch !== expected.branch
+    ) {
+      throw new SessionManagerError("SESSION_NOT_ACTIVE", "The current session principal changed before rebinding");
+    }
+    if (!replacement.operatorId.trim() || !replacement.branch.trim() || replacement.branch !== expected.branch) {
+      throw new TypeError("Replacement principal must use the same non-empty branch");
+    }
+    record.principal = { ...replacement };
+    record.lastUsedAtMs = this.#now();
+    return this.#snapshot(record);
+  }
+
   async acquire(
     sessionRef: string,
     runId: string,

@@ -1,0 +1,462 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "session.sign_on",
+    "name": "Sign on to MERIDIAN",
+    "description": "Create one isolated, memory-only MERIDIAN operator session.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "read",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T05:50:22.387Z",
+    "goal": "Sign on through the live MERIDIAN form: fill Operator ID from {{operator}}, fill Password from {{{{password}}}}, select Branch from {{branch}}, click Sign On exactly once, and finish only when the authenticated Main Menu heading is visible. Extract no outputs.",
+    "discoveryRunId": "discovery.f6006d0c-1afe-4f3d-98bb-b42fbb05b866",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "operator",
+      "description": "MERIDIAN operator ID",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 20
+      },
+      "required": true,
+      "classification": "secret"
+    },
+    {
+      "name": "password",
+      "description": "MERIDIAN operator password",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "required": true,
+      "classification": "secret"
+    },
+    {
+      "name": "branch",
+      "description": "Stable MERIDIAN branch option value",
+      "type": {
+        "kind": "string",
+        "enum": [
+          "MAIN-001",
+          "WEST-014",
+          "EAST-022"
+        ]
+      },
+      "required": true,
+      "classification": "internal"
+    }
+  ],
+  "outputs": [],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "fill",
+      "select",
+      "click"
+    ],
+    "maxEffect": "draft",
+    "inputRelations": []
+  },
+  "targets": [
+    {
+      "id": "target.operator.7dd0ba19af6d",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "operator",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "operator"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.password.4720bc7a7a8a",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "password"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.branch.52df751c2823",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "branch"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.sign-on.90629633ef55",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Sign On",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.operator.7dd0ba19af6d",
+        "value": {
+          "kind": "input",
+          "name": "operator"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.operator.7dd0ba19af6d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.operator.7dd0ba19af6d",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "operator"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.002.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.password.4720bc7a7a8a",
+        "value": {
+          "kind": "input",
+          "name": "password"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.password.4720bc7a7a8a",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.password.4720bc7a7a8a",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "password"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.branch.52df751c2823",
+        "value": {
+          "kind": "input",
+          "name": "branch"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.branch.52df751c2823",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.branch.52df751c2823",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "branch"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.004.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.sign-on.90629633ef55"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.sign-on.90629633ef55",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MAIN MENU",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "INVALID_CREDENTIALS",
+      "description": "MERIDIAN rejected the operator ID or password.",
+      "category": "business_outcome",
+      "priority": 995,
+      "condition": {
+        "kind": "text_visible",
+        "text": "Invalid operator ID or password.",
+        "exact": true
+      }
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "text_visible",
+    "text": "MAIN MENU",
+    "exact": true
+  }
+}

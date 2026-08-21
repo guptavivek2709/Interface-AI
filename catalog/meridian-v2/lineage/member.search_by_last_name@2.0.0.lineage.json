@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+  "lineageId": "lineage.member.search_by_last_name.5e962d51e0713e72",
+  "capabilityId": "member.search_by_last_name",
+  "capabilityVersion": "2.0.0",
+  "stage": "approved",
+  "discovery": {
+    "runId": "discovery.0f1540c5-e127-4720-8c22-f0e55ab9dba2",
+    "provider": "anthropic-messages",
+    "model": "claude-sonnet-5",
+    "mode": "model",
+    "traceDigest": "dbe2900ed0a0ecf5b505189fb25e4ecd55f5e013ee7745604aaefa90fb344747"
+  },
+  "draftDigest": "f72ee576a000d2dcb17a3812021f3513444126c501cec9b37309a8783bf5a827",
+  "reviewedDigest": "972295ef2d1dacce06c7a00cbffb2a375f1ff33f16b99ec4a0841893ede7151e",
+  "approvedDigest": "8af022ec3665019aff52b74026003d672519e4bb56a44debb1d7ed71c9e04466",
+  "events": [
+    {
+      "type": "draft_created",
+      "at": "2026-08-21T06:04:56.636Z",
+      "actor": "discovery_compiler",
+      "artifactDigest": "f72ee576a000d2dcb17a3812021f3513444126c501cec9b37309a8783bf5a827",
+      "traceDigest": "dbe2900ed0a0ecf5b505189fb25e4ecd55f5e013ee7745604aaefa90fb344747"
+    },
+    {
+      "type": "reviewed",
+      "at": "2026-08-21T06:22:42.572Z",
+      "actor": "codex-locator-resilience-review",
+      "artifactDigest": "972295ef2d1dacce06c7a00cbffb2a375f1ff33f16b99ec4a0841893ede7151e",
+      "parentArtifactDigest": "f72ee576a000d2dcb17a3812021f3513444126c501cec9b37309a8783bf5a827",
+      "reviewDiffDigest": "9f768c5be0efe734de50b3ba4cd77ed30c9c30c64456cc9a273ec3ae05ead2eb",
+      "changedPathCount": 26
+    },
+    {
+      "type": "canary_passed",
+      "at": "2026-08-21T06:23:19.658Z",
+      "actor": "canary_runner",
+      "artifactDigest": "972295ef2d1dacce06c7a00cbffb2a375f1ff33f16b99ec4a0841893ede7151e",
+      "canaryRunId": "canary.f9967778-666f-4dea-830f-55473d5c56d0",
+      "evidenceDigest": "dcf66a736e5cba66fe5c9fae22cf96f732e6ab52f11f3226f696ccf1f5020307"
+    },
+    {
+      "type": "approved",
+      "at": "2026-08-21T06:23:48.197Z",
+      "actor": "codex-final-promotion",
+      "artifactDigest": "8af022ec3665019aff52b74026003d672519e4bb56a44debb1d7ed71c9e04466",
+      "parentArtifactDigest": "972295ef2d1dacce06c7a00cbffb2a375f1ff33f16b99ec4a0841893ede7151e"
+    }
+  ]
+}

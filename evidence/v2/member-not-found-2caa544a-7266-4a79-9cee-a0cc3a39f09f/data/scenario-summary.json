@@ -1,0 +1,15 @@
+{
+  "scenario": "member-not-found",
+  "status": "verified",
+  "observation": {
+    "status": "business_outcome",
+    "code": "MEMBER_NOT_FOUND",
+    "capabilityId": "member.get_record_and_balances",
+    "incidentCodes": []
+  },
+  "assertion": {
+    "naturalBusinessOutcome": true,
+    "injectedFault": false
+  },
+  "plannerCallsAllowed": false
+}

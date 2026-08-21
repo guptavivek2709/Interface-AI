@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -25,8 +25,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -36,5 +36,3 @@ jobs:
         run: npm.cmd run typecheck
       - shell: pwsh
         run: npm.cmd test -- --run tests/cli/inputs.test.ts tests/model/anthropic-planner.test.ts tests/integration/replay-model-boundary.test.ts
-      - shell: cmd
-        run: npm.cmd run inspect -- --artifact "evidence/artifact.json"

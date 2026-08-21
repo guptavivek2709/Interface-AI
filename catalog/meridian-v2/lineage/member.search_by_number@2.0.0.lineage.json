@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+  "lineageId": "lineage.member.search_by_number.dc6dd735abf4d3ea",
+  "capabilityId": "member.search_by_number",
+  "capabilityVersion": "2.0.0",
+  "stage": "approved",
+  "discovery": {
+    "runId": "discovery.f1a54963-5857-45af-b490-756cfbb6abe1",
+    "provider": "anthropic-messages",
+    "model": "claude-sonnet-5",
+    "mode": "model",
+    "traceDigest": "c472590b65219d65edb3b8eeace7734b69f013d102919f5e0ebb9f96ec09d187"
+  },
+  "draftDigest": "bf860dbda8c843d09167a53198f2adcc551c6a5d60b6cb3a3cc09cffa0d349da",
+  "reviewedDigest": "ce56d454e0f2ae20c3fdd73f0b7c85009d407e7baee847c78fde2844ce97bd16",
+  "approvedDigest": "b504ccf76d04c0fdd646f834f0c0706a574c2f69cfb4251656b3db1317334e8b",
+  "events": [
+    {
+      "type": "draft_created",
+      "at": "2026-08-21T05:58:42.409Z",
+      "actor": "discovery_compiler",
+      "artifactDigest": "bf860dbda8c843d09167a53198f2adcc551c6a5d60b6cb3a3cc09cffa0d349da",
+      "traceDigest": "c472590b65219d65edb3b8eeace7734b69f013d102919f5e0ebb9f96ec09d187"
+    },
+    {
+      "type": "reviewed",
+      "at": "2026-08-21T06:22:41.482Z",
+      "actor": "codex-locator-resilience-review",
+      "artifactDigest": "ce56d454e0f2ae20c3fdd73f0b7c85009d407e7baee847c78fde2844ce97bd16",
+      "parentArtifactDigest": "bf860dbda8c843d09167a53198f2adcc551c6a5d60b6cb3a3cc09cffa0d349da",
+      "reviewDiffDigest": "78c8e22df561df5656532473e9c0cb915d81ec0029fa2f5925c1ec59c215a336",
+      "changedPathCount": 27
+    },
+    {
+      "type": "canary_passed",
+      "at": "2026-08-21T06:23:17.521Z",
+      "actor": "canary_runner",
+      "artifactDigest": "ce56d454e0f2ae20c3fdd73f0b7c85009d407e7baee847c78fde2844ce97bd16",
+      "canaryRunId": "canary.cac2cacd-298c-4c63-a91a-58e36f2332cf",
+      "evidenceDigest": "c24984c3d441dadd77883d608e386b45557c04a53b6a880f81b58c00684137b0"
+    },
+    {
+      "type": "approved",
+      "at": "2026-08-21T06:23:47.113Z",
+      "actor": "codex-final-promotion",
+      "artifactDigest": "b504ccf76d04c0fdd646f834f0c0706a574c2f69cfb4251656b3db1317334e8b",
+      "parentArtifactDigest": "ce56d454e0f2ae20c3fdd73f0b7c85009d407e7baee847c78fde2844ce97bd16"
+    }
+  ]
+}

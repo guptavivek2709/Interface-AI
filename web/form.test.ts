@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fieldPath, flattenProposal, isRunnable, serializeInputs } from "./form";
+import { fieldPath, flattenProposal, isRunnable, prepareProposalInputs, prepareSequenceStepInputs, serializeInputs } from "./form";
 import type { Capability } from "./types";
 
 const capability: Capability = {
@@ -12,6 +12,7 @@ const capability: Capability = {
   risk: "irreversible",
   tags: [],
   digest: "a".repeat(64),
+  targetProfileDigest: "b".repeat(64),
   contractValid: true,
   inputs: [
     { name: "amount", description: "Transfer amount", type: { kind: "money", currency: "USD" }, required: true, classification: "confidential" },
@@ -54,6 +55,22 @@ describe("guided capability forms", () => {
     expect(isRunnable({ ...capability, schemaVersion: "1.0" })).toBe(false);
   });
 
+  it("permits missing required sequence inputs only through one exact prior-step binding", () => {
+    const lookup: Capability = {
+      ...capability,
+      id: "member.get_record_and_balances",
+      risk: "read",
+      inputs: [{ name: "member_number", description: "Member number", type: { kind: "string" }, required: true, classification: "restricted" }],
+    };
+    expect(prepareSequenceStepInputs(lookup, {}, ["member_number"])).toEqual({ inputs: {}, errors: {} });
+    expect(prepareSequenceStepInputs(lookup, { member_number: "100234" }, ["member_number"]).errors).toEqual(expect.objectContaining({
+      member_number: expect.stringMatching(/unbound launchable input/u),
+    }));
+    expect(prepareSequenceStepInputs(lookup, {}, ["unknown_input"]).errors).toEqual(expect.objectContaining({
+      unknown_input: expect.stringMatching(/unbound launchable input/u),
+    }));
+  });
+
   it("preserves optional object and boolean absence until explicitly included", () => {
     const optional: Capability = {
       ...capability,
@@ -94,5 +111,35 @@ describe("guided capability forms", () => {
       inputs: [{ name: "email", description: "Email", required: true, classification: "internal", type: { kind: "string", format: "email" } }],
     };
     expect(serializeInputs(email, { email: "not-an-email" }, {}).errors.email).toMatch(/valid email/u);
+  });
+
+  it("prepares exact proposal inputs without silently retaining protected or unknown fields", () => {
+    expect(prepareProposalInputs(capability, { amount: "5", operatorPassword: "canary" })).toEqual({
+      inputs: { amount: "5.00" },
+      errors: expect.objectContaining({ operatorPassword: expect.stringMatching(/launchable/u) }),
+    });
+    expect(prepareProposalInputs(capability, { amount: "5.00", unexpected: "value" }).errors).toEqual(
+      expect.objectContaining({ unexpected: expect.stringMatching(/launchable/u) }),
+    );
+    expect(prepareProposalInputs(capability, { amount: "5.00" })).toEqual({
+      inputs: { amount: "5.00" },
+      errors: {},
+    });
+  });
+
+  it("rejects unknown nested proposal fields before form flattening can drop them", () => {
+    const nested: Capability = {
+      ...capability,
+      inputs: [{
+        name: "profile",
+        description: "Profile",
+        required: true,
+        classification: "internal",
+        type: { kind: "object", required: ["name"], properties: { name: { kind: "string", minLength: 1 } } },
+      }],
+    };
+    const prepared = prepareProposalInputs(nested, { profile: { name: "Ada", ignored: "must-not-drop-silently" } });
+    expect(prepared.inputs).toEqual({ profile: { name: "Ada" } });
+    expect(prepared.errors[fieldPath(["profile", "ignored"])]).toMatch(/not part/u);
   });
 });

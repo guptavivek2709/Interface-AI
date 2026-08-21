@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError, cancelRun, CHAT_REQUEST_TIMEOUT_MS, createSession, evidenceFinalizationStatus, evidenceUrl, getAuthState, getRun, normalizeAuthState, normalizeCapability, normalizeEvidenceList, normalizeEvidenceListing, normalizeLiveEvent, normalizeRun, postChat } from "./api";
+import { ApiError, approveRun, cancelRun, CHAT_REQUEST_TIMEOUT_MS, createRun, createSession, evidenceFinalizationStatus, evidenceUrl, getAuthState, getReconciliation, getRun, normalizeAuthState, normalizeCapability, normalizeEvidenceList, normalizeEvidenceListing, normalizeLiveEvent, normalizeRun, postChat, startReconciliation, takeHumanControl } from "./api";
 import { containsCredentialMaterial, containsProtectedMaterial, contractValues, isProtectedField, redactForDisplay } from "./security";
+import type { Capability } from "./types";
 
 describe("frontend wire normalization", () => {
   it("normalizes V2 catalog metadata without coupling to server classes", () => {
@@ -13,6 +14,18 @@ describe("frontend wire normalization", () => {
         approval: "approved",
         risk: "read",
         digest: "a".repeat(64),
+        targetProfileDigest: "9".repeat(64),
+        lineage: {
+          lineageId: "lineage.member.lookup",
+          discoveryRunId: "discovery.11111111-1111-4111-8111-111111111111",
+          provider: "anthropic-messages",
+          model: "claude-sonnet-5",
+          traceDigest: "1".repeat(64),
+          draftDigest: "2".repeat(64),
+          reviewedDigest: "3".repeat(64),
+          approvedDigest: "a".repeat(64),
+          canaryRunId: "canary.22222222-2222-4222-8222-222222222222",
+        },
         inputs: [
           {
             name: "memberNumber",
@@ -29,6 +42,13 @@ describe("frontend wire normalization", () => {
         id: "member.lookup",
         risk: "read",
         contractValid: true,
+        lineage: expect.objectContaining({
+          discoveryRunId: "discovery.11111111-1111-4111-8111-111111111111",
+          provider: "anthropic-messages",
+          model: "claude-sonnet-5",
+          draftDigest: "2".repeat(64),
+          approvedDigest: "a".repeat(64),
+        }),
         inputs: [expect.objectContaining({ name: "memberNumber", type: { kind: "string", format: "member_number" } })],
       }),
     );
@@ -41,9 +61,42 @@ describe("frontend wire normalization", () => {
         approval: "unknown",
         risk: "supervisor_only",
         digest: "",
+        targetProfileDigest: "",
         contractValid: false,
       }),
     );
+  });
+
+  it("does not launch approved metadata without an exact published discovery lineage", () => {
+    const digest = "a".repeat(64);
+    const metadata = {
+      id: "member.lookup",
+      name: "Find member",
+      description: "Read a member record",
+      version: "2.0.0",
+      schemaVersion: "2.0",
+      approval: "approved",
+      risk: "read",
+      digest,
+      targetProfileDigest: "9".repeat(64),
+      inputs: [],
+      outputs: [],
+    };
+    expect(normalizeCapability(metadata)?.contractValid).toBe(false);
+    expect(normalizeCapability({
+      ...metadata,
+      lineage: {
+        lineageId: "lineage.member.lookup",
+        discoveryRunId: "discovery.11111111-1111-4111-8111-111111111111",
+        provider: "anthropic-messages",
+        model: "claude-sonnet-5",
+        traceDigest: "1".repeat(64),
+        draftDigest: "2".repeat(64),
+        reviewedDigest: "3".repeat(64),
+        approvedDigest: "b".repeat(64),
+        canaryRunId: "canary.22222222-2222-4222-8222-222222222222",
+      },
+    })?.contractValid).toBe(false);
   });
 
   it("rejects malformed money contracts and duplicate field names", () => {
@@ -55,6 +108,7 @@ describe("frontend wire normalization", () => {
       approval: "approved",
       risk: "write",
       digest: "b".repeat(64),
+      targetProfileDigest: "8".repeat(64),
       outputs: [],
     };
     expect(normalizeCapability({
@@ -72,7 +126,7 @@ describe("frontend wire normalization", () => {
       schemaVersion: "1.0",
       inputs: [{ name: "memo", description: "Memo", type: "string", required: false, classification: "internal" }],
       outputs: [{ name: "balance", description: "Balance", type: "money", classification: "restricted" }],
-    })?.contractValid).toBe(true);
+    })?.contractValid).toBe(false);
   });
 
   it("restores only projected owned-session metadata", () => {
@@ -182,6 +236,33 @@ describe("frontend wire normalization", () => {
     });
     expect(futureGate).toEqual(expect.objectContaining({ phase: "awaiting_human" }));
     expect(futureGate?.challenge).toBeUndefined();
+  });
+
+  it("derives delegated approval solely from server-projected authorized roles", () => {
+    const challenge = {
+      challengeId: "challenge-authority",
+      runId: "run-authority",
+      stepId: "commit",
+      requirement: "supervisor_confirmation",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      expiresAt: "2099-08-20T00:05:00.000Z",
+      summary: [{ targetId: "amount", sensitive: false, displaySafe: true, displayValue: "$1.00" }],
+    };
+    const tellerOnly = normalizeRun({
+      runId: "run-authority",
+      capabilityId: "account.place_hold",
+      phase: "awaiting_approval",
+      challenge: { ...challenge, authorized: true, authorizedRoles: ["teller"] },
+    });
+    expect(tellerOnly?.challenge?.authorized).toBe(false);
+
+    const delegatedSupervisor = normalizeRun({
+      runId: "run-authority",
+      capabilityId: "account.place_hold",
+      phase: "awaiting_approval",
+      challenge: { ...challenge, authorized: false, authorizedRoles: ["supervisor"] },
+    });
+    expect(delegatedSupervisor?.challenge?.authorized).toBe(true);
   });
 
   it("blocks malformed, duplicate, and truncated approval summaries", () => {
@@ -370,12 +451,117 @@ describe("frontend wire normalization", () => {
       capabilityId: "session.sign_on",
       capabilityVersion: "2.0.0",
       artifactDigest: "c".repeat(64),
+      targetProfileDigest: "7".repeat(64),
       phase: "queued",
       inputs: { branch: "[Protected]", password: "[Protected]" },
     } }), { status: 202, headers: { "content-type": "application/json" } })));
     await expect(createSession("teller", "MAIN-001")).resolves.toEqual({
       run: expect.objectContaining({ id: "run-sign-on", capabilityId: "session.sign_on" }),
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("submits an authenticated chat proposal through the digest-bound run API", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const capability: Capability = {
+      id: "member.get_record_and_balances",
+      name: "Get balances",
+      description: "Read a member record",
+      version: "2.0.0",
+      schemaVersion: "2.0",
+      approval: "approved",
+      risk: "read",
+      tags: [],
+      inputs: [],
+      outputs: [],
+      digest: "d".repeat(64),
+      targetProfileDigest: "6".repeat(64),
+      contractValid: true,
+    };
+    const fetchMock = vi.fn().mockImplementation(async (input: string, init: RequestInit) => {
+      expect(input).toBe("/api/v1/runs");
+      expect(init.method).toBe("POST");
+      expect(init.headers).toMatchObject({
+        "idempotency-key": "chat-request-key",
+        "x-meridian-action": "operator",
+      });
+      expect(JSON.parse(String(init.body))).toEqual({
+        capabilityId: capability.id,
+        capabilityVersion: capability.version,
+        artifactDigest: capability.digest,
+        targetProfileDigest: capability.targetProfileDigest,
+        inputs: { member_number: "100234" },
+      });
+      return new Response(JSON.stringify({ run: {
+        runId: "run-from-chat",
+        capabilityId: capability.id,
+        capabilityVersion: capability.version,
+        artifactDigest: capability.digest,
+        targetProfileDigest: capability.targetProfileDigest,
+        phase: "queued",
+      } }), { status: 202, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createRun({
+      capability,
+      inputs: { member_number: "100234" },
+      idempotencyKey: "chat-request-key",
+    })).resolves.toEqual(expect.objectContaining({ id: "run-from-chat", phase: "queued" }));
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects a run response that changes a proposal's approved digest binding", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const capability: Capability = {
+      id: "member.get_record_and_balances",
+      name: "Get balances",
+      description: "Read a member record",
+      version: "2.0.0",
+      schemaVersion: "2.0",
+      approval: "approved",
+      risk: "read",
+      tags: [],
+      inputs: [],
+      outputs: [],
+      digest: "e".repeat(64),
+      targetProfileDigest: "5".repeat(64),
+      contractValid: true,
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ run: {
+      runId: "run-mismatched",
+      capabilityId: capability.id,
+      capabilityVersion: capability.version,
+      artifactDigest: "f".repeat(64),
+      targetProfileDigest: capability.targetProfileDigest,
+      phase: "queued",
+    } }), { status: 202, headers: { "content-type": "application/json" } })));
+    await expect(createRun({ capability, inputs: {}, idempotencyKey: "chat-request-key" })).rejects.toEqual(
+      expect.objectContaining<ApiError>({ code: "RUN_BINDING_MISMATCH" }),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("submits only the exact server challenge ID when a chat run reaches approval", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const fetchMock = vi.fn().mockImplementation(async (input: string, init: RequestInit) => {
+      expect(input).toBe("/api/v1/runs/run-from-chat/approve");
+      expect(init.method).toBe("POST");
+      expect(init.headers).toMatchObject({ "x-meridian-action": "operator" });
+      expect(JSON.parse(String(init.body))).toEqual({ challengeId: "challenge-from-run", decision: "approve" });
+      return new Response(JSON.stringify({ run: {
+        runId: "run-from-chat",
+        capabilityId: "member.update_contact",
+        capabilityVersion: "2.0.0",
+        artifactDigest: "a".repeat(64),
+        phase: "running",
+      } }), { status: 202, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(approveRun("run-from-chat", "challenge-from-run")).resolves.toEqual(expect.objectContaining({
+      id: "run-from-chat",
+      phase: "running",
+    }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
 
@@ -461,16 +647,232 @@ describe("frontend wire normalization", () => {
     vi.unstubAllGlobals();
   });
 
-  it("retains explicit fallback routing metadata without claiming Anthropic handled it", async () => {
+  it("retains Anthropic routing metadata", async () => {
     vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ route: {
       kind: "reply",
-      text: "Deterministic guidance",
-      metadata: { provider: "deterministic", model: null, fallbackFrom: "anthropic" },
+      text: "Anthropic guidance",
+      metadata: { provider: "anthropic-messages", model: null },
     } }), { status: 200, headers: { "content-type": "application/json" } })));
     await expect(postChat("Show safe capabilities", [])).resolves.toEqual(expect.objectContaining({
-      routing: { provider: "deterministic", fallbackFrom: "anthropic" },
+      routing: { provider: "anthropic-messages" },
     }));
+    vi.unstubAllGlobals();
+  });
+
+  it("never promotes model-supplied approval material into a chat proposal", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      artifactDigest: "b".repeat(64),
+      targetProfileDigest: "4".repeat(64),
+      route: {
+        kind: "invoke",
+        text: "Starting the validated lookup.",
+        capabilityId: "member.get_record_and_balances",
+        capabilityVersion: "2.0.0",
+        arguments: { member_number: "100234" },
+        approvalToken: "model-forged-token",
+        challengeId: "model-forged-challenge",
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+    const response = await postChat("Look up member 100234", []);
+    expect(response.proposal).toEqual({
+      capabilityId: "member.get_record_and_balances",
+      capabilityVersion: "2.0.0",
+      artifactDigest: "b".repeat(64),
+      targetProfileDigest: "4".repeat(64),
+      arguments: { member_number: "100234" },
+    });
+    expect(response).not.toHaveProperty("approvalToken");
+    expect(response).not.toHaveProperty("challengeId");
+    vi.unstubAllGlobals();
+  });
+
+  it("parses only an exact bounded sequence with server-bound profile digests", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ route: {
+      kind: "sequence",
+      sequenceId: "11111111-1111-4111-8111-111111111111",
+      failurePolicy: "stop_on_non_success",
+      assistantText: "I will find the member and then read balances.",
+      expiresAt: "2099-08-20T00:15:00.000Z",
+      metadata: { provider: "anthropic-messages" },
+      steps: [
+        {
+          stepId: "find_member",
+          toolName: "member_search",
+          capabilityId: "member.search_by_last_name",
+          capabilityVersion: "2.0.0",
+          literalArguments: { last_name: "Rivera" },
+          bindings: [],
+          artifactDigest: "1".repeat(64),
+          targetProfileDigest: "2".repeat(64),
+        },
+        {
+          stepId: "read_balances",
+          toolName: "member_balances",
+          capabilityId: "member.get_record_and_balances",
+          capabilityVersion: "2.0.0",
+          literalArguments: {},
+          bindings: [{
+            sourceStepId: "find_member",
+            sourceCollectionPath: ["candidates"],
+            valuePath: ["member_number"],
+            targetInput: "member_number",
+            selection: "exactly_one",
+            onZero: "stop_no_match",
+            onMany: "pause_for_authenticated_selection",
+          }],
+          artifactDigest: "3".repeat(64),
+          targetProfileDigest: "2".repeat(64),
+        },
+      ],
+    } }), { status: 200, headers: { "content-type": "application/json" } })));
+    const response = await postChat("Find Rivera and show balances", []);
+    expect(response.sequence).toEqual(expect.objectContaining({
+      sequenceId: "11111111-1111-4111-8111-111111111111",
+      failurePolicy: "stop_on_non_success",
+      steps: [
+        expect.objectContaining({ stepId: "find_member", targetProfileDigest: "2".repeat(64) }),
+        expect.objectContaining({ stepId: "read_balances", bindings: [expect.objectContaining({ selection: "exactly_one" })] }),
+      ],
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("submits sequence lineage without any browser idempotency key", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const capability: Capability = {
+      id: "member.search_by_last_name", name: "Search", description: "Search members", version: "2.0.0",
+      schemaVersion: "2.0", approval: "approved", risk: "read", tags: [], inputs: [], outputs: [],
+      digest: "1".repeat(64), targetProfileDigest: "2".repeat(64), contractValid: true,
+    };
+    const fetchMock = vi.fn().mockImplementation(async (input: string, init: RequestInit) => {
+      expect(input).toBe("/api/v1/runs");
+      expect(init.headers).toEqual(expect.objectContaining({ "x-meridian-action": "operator" }));
+      expect(init.headers).not.toEqual(expect.objectContaining({ "idempotency-key": expect.anything() }));
+      expect(JSON.parse(String(init.body))).toEqual({
+        capabilityId: capability.id,
+        capabilityVersion: capability.version,
+        artifactDigest: capability.digest,
+        targetProfileDigest: capability.targetProfileDigest,
+        inputs: { last_name: "Rivera" },
+        sequence: { sequenceId: "11111111-1111-4111-8111-111111111111", stepId: "find_member" },
+      });
+      return new Response(JSON.stringify({ run: {
+        runId: "run-sequence-1", capabilityId: capability.id, capabilityVersion: capability.version,
+        artifactDigest: capability.digest, targetProfileDigest: capability.targetProfileDigest, phase: "queued",
+        orchestration: { kind: "chat_sequence", sequenceId: "11111111-1111-4111-8111-111111111111", stepId: "find_member", stepIndex: 0, stepCount: 2 },
+      } }), { status: 202, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createRun({
+      capability,
+      inputs: { last_name: "Rivera" },
+      sequence: { sequenceId: "11111111-1111-4111-8111-111111111111", stepId: "find_member" },
+    })).resolves.toEqual(expect.objectContaining({ id: "run-sequence-1", orchestration: expect.objectContaining({ stepIndex: 0 }) }));
+    vi.unstubAllGlobals();
+  });
+
+  it("retains only strict authenticated sequence-selection details", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const capability: Capability = {
+      id: "member.get_record_and_balances", name: "Balances", description: "Read balances", version: "2.0.0",
+      schemaVersion: "2.0", approval: "approved", risk: "read", tags: [], inputs: [], outputs: [],
+      digest: "3".repeat(64), targetProfileDigest: "2".repeat(64), contractValid: true,
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: {
+      code: "SEQUENCE_SELECTION_REQUIRED",
+      message: "Choose one row.",
+      details: { sourceStepId: "find_member", sourceCollectionPath: ["candidates"], count: 3, rawRows: [{ password: "omit" }] },
+    } }), { status: 409, headers: { "content-type": "application/json" } })));
+    await expect(createRun({
+      capability,
+      inputs: {},
+      sequence: { sequenceId: "11111111-1111-4111-8111-111111111111", stepId: "read_balances" },
+    })).rejects.toEqual(expect.objectContaining<ApiError>({
+      code: "SEQUENCE_SELECTION_REQUIRED",
+      details: { sourceStepId: "find_member", sourceCollectionPath: ["candidates"], count: 3 },
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("normalizes and mutates only the current same-session intervention", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const intervention = {
+      interventionId: "22222222-2222-4222-8222-222222222222",
+      runId: "run-handoff",
+      stepId: "restore_checkpoint",
+      reasonCode: "SESSION_EXPIRED",
+      action: "restore_session",
+      state: "human_active",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      expiresAt: "2099-08-20T00:05:00.000Z",
+      sameLiveSession: true,
+    };
+    const fetchMock = vi.fn().mockImplementation(async (input: string, init: RequestInit) => {
+      expect(input).toBe("/api/v1/runs/run-handoff/handoff/take");
+      expect(JSON.parse(String(init.body))).toEqual({ interventionId: intervention.interventionId });
+      return new Response(JSON.stringify({ run: {
+        runId: "run-handoff", capabilityId: "member.update_contact", phase: "awaiting_human", intervention,
+      } }), { status: 202, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(takeHumanControl("run-handoff", intervention.interventionId)).resolves.toEqual(expect.objectContaining({
+      phase: "awaiting_human",
+      intervention: expect.objectContaining({ state: "human_active", sameLiveSession: true }),
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves action-completed handoffs and intervention incidents", () => {
+    const normalized = normalizeRun({
+      runId: "run-action-completed",
+      capabilityId: "account.place_hold",
+      capabilityVersion: "2.0.0",
+      phase: "awaiting_human",
+      intervention: {
+        interventionId: "22222222-2222-4222-8222-222222222222",
+        runId: "run-action-completed",
+        stepId: "supervisor_checkpoint",
+        reasonCode: "SUPERVISOR_AUTH_REQUIRED",
+        action: "authenticate_supervisor",
+        state: "action_completed",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        expiresAt: "2099-08-20T00:05:00.000Z",
+        sameLiveSession: true,
+        requiredRole: "supervisor",
+      },
+      incidents: [{
+        code: "SUPERVISOR_AUTH_REQUIRED",
+        category: "intervention",
+        message: "A supervisor must authenticate in the retained session.",
+        occurredAt: "2026-08-20T00:01:00.000Z",
+      }],
+    });
+    expect(normalized?.intervention?.state).toBe("action_completed");
+    expect(normalized?.incidents[0]?.category).toBe("intervention");
+  });
+
+  it("starts and reads only a server-authored reconciliation lineage", async () => {
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reconciliation: { sourceRunId: "run-write", runId: "run-read", status: "running" },
+        run: { runId: "run-read", capabilityId: "member.get_record_and_balances", phase: "queued", orchestration: { kind: "reconciliation", sourceRunId: "run-write" } },
+      }), { status: 202, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reconciliation: { sourceRunId: "run-write", runId: "run-read", status: "complete", decision: { classification: "applied", reason: "Current state matches the intended change.", checkedFields: ["phone"] } },
+        run: { runId: "run-read", capabilityId: "member.get_record_and_balances", phase: "completed", status: "success", orchestration: { kind: "reconciliation", sourceRunId: "run-write" } },
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(startReconciliation("run-write")).resolves.toEqual(expect.objectContaining({
+      run: expect.objectContaining({ id: "run-read", orchestration: { kind: "reconciliation", sourceRunId: "run-write" } }),
+    }));
+    await expect(getReconciliation("run-write")).resolves.toEqual(expect.objectContaining({
+      reconciliation: expect.objectContaining({ status: "complete", decision: expect.objectContaining({ classification: "applied" }) }),
+    }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({});
     vi.unstubAllGlobals();
   });
 

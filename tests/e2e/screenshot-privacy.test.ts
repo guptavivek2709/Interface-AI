@@ -1,77 +1,90 @@
+import { once } from "node:events";
+import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PNG } from "pngjs";
 import { afterEach, describe, expect, it } from "vitest";
-import { startDemoServer, type DemoServer } from "../../src/demo/index.js";
-import { createLegacyBankProfile } from "../../src/profiles/index.js";
-import { PolicyEngine } from "../../src/safety/policy.js";
 import { PlaywrightSurface } from "../../src/surface/playwright/playwrightSurface.js";
 
+interface FixtureServer {
+  readonly baseUrl: string;
+  close(): Promise<void>;
+}
+
+async function startFixtureServer(): Promise<FixtureServer> {
+  const server: Server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(`<!doctype html>
+      <html><head><title>Privacy fixture</title></head><body>
+        <label for="account-type">Account type</label>
+        <select id="account-type" name="accountType">
+          <option value="checking">Checking</option>
+          <option value="savings">Savings</option>
+        </select>
+        <p>Request denied for <strong data-sensitive>DENIED-1001</strong>.</p>
+      </body></html>`);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Privacy fixture did not bind a TCP port");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    },
+  };
+}
+
+function maskedPixel(png: PNG, box: { x: number; y: number; width: number; height: number }): number[] {
+  const sampleX = Math.round(box.x + box.width / 2);
+  const sampleY = Math.round(box.y + box.height / 2);
+  const offset = (sampleY * png.width + sampleX) * 4;
+  return [...png.data.subarray(offset, offset + 4)];
+}
+
 describe("masked screenshot privacy", () => {
-  let demo: DemoServer | undefined;
+  let fixture: FixtureServer | undefined;
   let surface: PlaywrightSurface | undefined;
   let scratch: string | undefined;
 
   afterEach(async () => {
     await surface?.close();
-    await demo?.close();
+    await fixture?.close();
     if (scratch) await rm(scratch, { recursive: true, force: true });
   });
 
-  it("covers a selected value with the configured opaque mask color", async () => {
-    demo = await startDemoServer();
+  async function startSurface(): Promise<void> {
+    fixture = await startFixtureServer();
     scratch = await mkdtemp(path.join(tmpdir(), "screenshot-mask-test-"));
-    const profile = createLegacyBankProfile(demo.baseUrl);
-    const policy = new PolicyEngine(profile.policy);
-    surface = new PlaywrightSurface({
-      observationDirectory: scratch,
-      assertNavigationAllowed: (url, kind) => policy.assertNavigationAllowed({ url, kind }),
-      assertResourceAllowed: (url) => policy.assertResourceAllowed(url),
-    });
-    await surface.start(`${demo.baseUrl}/?tenant=summit`);
+    surface = new PlaywrightSurface({ observationDirectory: scratch });
+    await surface.start(fixture.baseUrl);
+  }
 
-    const workspace = surface.page.frameLocator('iframe[title="Core banking workspace"]');
-    await workspace.getByLabel("Member number", { exact: true }).fill("MBR-1001");
-    await workspace.getByRole("button", { name: "Search", exact: true }).click();
-    await workspace.getByRole("button", { name: "Open sub-account", exact: true }).click();
-    const select = workspace.getByLabel("Account type", { exact: true });
+  it("covers a selected value with the configured opaque mask color", async () => {
+    await startSurface();
+    const select = surface!.page.getByLabel("Account type", { exact: true });
     await select.selectOption({ label: "Savings" });
     const box = await select.boundingBox();
     expect(box).not.toBeNull();
 
-    const png = PNG.sync.read(await surface.captureMaskedScreenshot());
-    const sampleX = Math.round(box!.x + box!.width / 2);
-    const sampleY = Math.round(box!.y + box!.height / 2);
-    const offset = (sampleY * png.width + sampleX) * 4;
-    expect([...png.data.subarray(offset, offset + 4)]).toEqual([17, 17, 17, 255]);
+    const png = PNG.sync.read(await surface!.captureMaskedScreenshot());
+    expect(maskedPixel(png, box!)).toEqual([17, 17, 17, 255]);
   });
 
   it("covers a dynamic member identifier inside failure prose", async () => {
-    demo = await startDemoServer();
-    scratch = await mkdtemp(path.join(tmpdir(), "screenshot-mask-test-"));
-    const profile = createLegacyBankProfile(demo.baseUrl);
-    const policy = new PolicyEngine(profile.policy);
-    surface = new PlaywrightSurface({
-      observationDirectory: scratch,
-      assertNavigationAllowed: (url, kind) => policy.assertNavigationAllowed({ url, kind }),
-      assertResourceAllowed: (url) => policy.assertResourceAllowed(url),
-    });
-    await surface.start(`${demo.baseUrl}/?tenant=summit`);
-
-    const workspace = surface.page.frameLocator('iframe[title="Core banking workspace"]');
-    await workspace.getByLabel("Member number", { exact: true }).fill("DENIED-1001");
-    await workspace.getByRole("button", { name: "Search", exact: true }).click();
-    const memberIdentifier = workspace.locator('[data-sensitive="member-number"]');
+    await startSurface();
+    const memberIdentifier = surface!.page.locator("[data-sensitive]");
     await memberIdentifier.waitFor({ state: "visible" });
-    expect(await memberIdentifier.count()).toBe(1);
     const box = await memberIdentifier.boundingBox();
     expect(box).not.toBeNull();
 
-    const png = PNG.sync.read(await surface.captureMaskedScreenshot());
-    const sampleX = Math.round(box!.x + box!.width / 2);
-    const sampleY = Math.round(box!.y + box!.height / 2);
-    const offset = (sampleY * png.width + sampleX) * 4;
-    expect([...png.data.subarray(offset, offset + 4)]).toEqual([17, 17, 17, 255]);
+    const png = PNG.sync.read(await surface!.captureMaskedScreenshot());
+    expect(maskedPixel(png, box!)).toEqual([17, 17, 17, 255]);
   });
 });

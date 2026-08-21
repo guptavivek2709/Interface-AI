@@ -18,6 +18,10 @@ import {
 } from "../domain/index.js";
 import type { EventRecorder } from "../evidence/event-recorder.js";
 import type { EvidenceStore } from "../evidence/store.js";
+import {
+  ControlCoordinator,
+  type ControlLease,
+} from "../handoff/controlCoordinator.js";
 import type { Redactor } from "../safety/redactor.js";
 import { sha256Digest } from "../security/digest.js";
 import {
@@ -39,18 +43,20 @@ function registerSensitiveRuntimeValue(
   redactor: Redactor | undefined,
   value: RuntimeValue | undefined,
   depth = 0,
+  mode: "substring" | "exact" = "substring",
 ): void {
   if (!redactor || value === undefined || value === null || depth > 20) return;
   if (typeof value === "string") {
-    redactor.register(value);
+    if (mode === "exact") redactor.registerExact(value);
+    else redactor.register(value);
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) registerSensitiveRuntimeValue(redactor, item, depth + 1);
+    for (const item of value) registerSensitiveRuntimeValue(redactor, item, depth + 1, mode);
     return;
   }
   if (typeof value === "object") {
-    for (const item of Object.values(value)) registerSensitiveRuntimeValue(redactor, item, depth + 1);
+    for (const item of Object.values(value)) registerSensitiveRuntimeValue(redactor, item, depth + 1, mode);
   }
 }
 
@@ -59,6 +65,17 @@ interface PendingApproval {
   expiresInMs: number;
   expiresAtMs: number;
   progress: Extract<ReplayProgressV2, { status: "awaiting_approval" }>;
+}
+
+interface PendingHuman {
+  rule: RuntimeStateRuleV2;
+  step?: StepV2;
+  originalSessionId: string;
+  originalSessionRef: string;
+  expiresAtMs: number;
+  progress: Extract<ReplayProgressV2, { status: "awaiting_human" }>;
+  humanLease?: ControlLease;
+  actionCompleted: boolean;
 }
 
 interface ApprovalSnapshot {
@@ -81,6 +98,7 @@ interface DetectedState {
 
 type StateDisposition =
   | { kind: "continue"; stepIndex: number }
+  | { kind: "pause"; progress: Extract<ReplayProgressV2, { status: "awaiting_human" }> }
   | { kind: "terminal"; result: TerminalRunResultV2 };
 
 type TerminalDetailsV2 =
@@ -93,6 +111,7 @@ type TerminalDetailsV2 =
       retryable: boolean;
       stepId?: string;
       effectUncertain: boolean;
+      reconciliationOutputs?: Record<string, RunValueV2>;
     }
   | { status: "escalation"; code: string; message: string; requiredRole?: string; stepId?: string };
 
@@ -109,6 +128,8 @@ class StepPostconditionError extends Error {
 export interface ReplayRunnerV2Options {
   artifact: CapabilityArtifactV2;
   artifactDigest?: string;
+  /** When set, artifactDigest identifies the approved base vendor contract. */
+  targetProfileDigest?: string;
   /**
    * Trusted request digest supplied by the execution boundary. This permits a
    * server to hydrate secret inputs only inside the runner factory without
@@ -126,16 +147,38 @@ export interface ReplayRunnerV2Options {
   timeoutMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
+  restoreSession?: () => Promise<void>;
+  authenticateSupervisor?: () => Promise<void>;
+  currentPrincipalRole?: () => string | undefined;
   onPhase?: (phase: "running" | "recovering", detail?: Readonly<Record<string, unknown>>) => void;
+}
+
+export class HandoffError extends Error {
+  readonly code:
+    | "HANDOFF_MISMATCH"
+    | "HANDOFF_EXPIRED"
+    | "HANDOFF_STATE_INVALID"
+    | "HANDOFF_ACTION_INVALID"
+    | "ROLE_REQUIRED";
+
+  constructor(code: HandoffError["code"], message: string) {
+    super(message);
+    this.name = "HandoffError";
+    this.code = code;
+  }
 }
 
 export class ReplayRunnerV2 {
   readonly #artifact: CapabilityArtifactV2;
   readonly #artifactDigest: string;
+  readonly #runtimeArtifactDigest: string;
+  readonly #targetProfileDigest: string | undefined;
+  readonly #approvalArtifactDigest: string;
   readonly #inputDigest: string;
   readonly #options: ReplayRunnerV2Options;
   readonly #runtime: ReplayRuntimeV2;
   readonly #authority: ApprovalAuthority;
+  readonly #control: ControlCoordinator;
   readonly #runId: string;
   readonly #startedAt: string;
   readonly #deadline: number;
@@ -155,6 +198,8 @@ export class ReplayRunnerV2 {
   #stepIndex = 0;
   #started = false;
   #pending: PendingApproval | undefined;
+  #pendingHuman: PendingHuman | undefined;
+  #automationLease: ControlLease;
   #terminal: TerminalRunResultV2 | undefined;
   #recoveryRedirected = false;
 
@@ -162,18 +207,42 @@ export class ReplayRunnerV2 {
     this.#options = options;
     this.#artifact = CapabilityArtifactV2Schema.parse(options.artifact);
     const computedArtifactDigest = sha256Digest(this.#artifact);
-    if (options.artifactDigest !== undefined && options.artifactDigest !== computedArtifactDigest) {
+    if (options.targetProfileDigest !== undefined) {
+      if (!/^[a-f0-9]{64}$/u.test(options.targetProfileDigest)) {
+        throw new TypeError("Supplied target profile digest must be a lowercase SHA-256 digest");
+      }
+      if (options.artifactDigest === undefined || !/^[a-f0-9]{64}$/u.test(options.artifactDigest)) {
+        throw new TypeError("Target-bound replay requires the approved base artifact digest");
+      }
+    } else if (options.artifactDigest !== undefined && options.artifactDigest !== computedArtifactDigest) {
       throw new TypeError("Supplied artifact digest does not match the validated capability artifact");
     }
-    this.#artifactDigest = computedArtifactDigest;
+    this.#runtimeArtifactDigest = computedArtifactDigest;
+    this.#artifactDigest = options.artifactDigest ?? computedArtifactDigest;
+    this.#targetProfileDigest = options.targetProfileDigest;
+    this.#approvalArtifactDigest = options.targetProfileDigest
+      ? sha256Digest({
+          baseArtifactDigest: this.#artifactDigest,
+          targetProfileDigest: options.targetProfileDigest,
+        })
+      : this.#artifactDigest;
     if (options.inputDigest !== undefined && !/^[a-f0-9]{64}$/u.test(options.inputDigest)) {
       throw new TypeError("Supplied input digest must be a lowercase SHA-256 digest");
     }
     this.#inputDigest = options.inputDigest ?? sha256Digest(options.inputs);
     this.#runtime = options.runtime;
     this.#authority = options.approvalAuthority;
+    options.redactor?.register(this.#runtime.sessionId);
     options.redactor?.register(this.#runtime.sessionRef);
     this.#runId = options.runId ?? options.recorder?.runId ?? randomUUID();
+    this.#control = new ControlCoordinator({
+      sessionId: this.#runtime.sessionId,
+      automationId: `replay-v2:${this.#runId}`,
+      eventSink: async (event) => {
+        await options.recorder?.record(event.type, event.data, { actor: { type: event.actor } });
+      },
+    });
+    this.#automationLease = this.#control.automationLease();
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     const started = this.#now();
@@ -209,6 +278,7 @@ export class ReplayRunnerV2 {
   async run(): Promise<ReplayProgressV2> {
     if (this.#terminal) return { status: "terminal", phase: "completed", result: this.#terminal };
     if (this.#pending) return this.#pending.progress;
+    if (this.#pendingHuman) return this.#pendingHuman.progress;
     if (!this.#started) {
       this.#started = true;
       await this.#record("replay.v2.started", {
@@ -216,6 +286,8 @@ export class ReplayRunnerV2 {
         capabilityId: this.#artifact.capability.id,
         capabilityVersion: this.#artifact.capability.version,
         artifactDigest: this.#artifactDigest,
+        runtimeArtifactDigest: this.#runtimeArtifactDigest,
+        ...(this.#targetProfileDigest ? { targetProfileDigest: this.#targetProfileDigest } : {}),
         inputDigest: this.#inputDigest,
         sessionBindingDigest: sha256Digest(this.#runtime.sessionRef),
         plannerCallsAllowed: false,
@@ -251,11 +323,120 @@ export class ReplayRunnerV2 {
   }
 
   async close(): Promise<void> {
+    if (this.#control.phase !== "terminal") await this.#control.terminate();
     await this.#runtime.close();
+  }
+
+  async takeHumanControl(interventionId: string, actor: ApprovalActor): Promise<ReplayProgressV2> {
+    const pending = this.#assertHumanPending(interventionId);
+    if (!actor.id.trim() || actor.roles.length === 0) {
+      throw new HandoffError("ROLE_REQUIRED", "An authenticated operator and role are required");
+    }
+    if (pending.rule.requiredRole && !actor.roles.includes(pending.rule.requiredRole)) {
+      throw new HandoffError("ROLE_REQUIRED", `The ${pending.rule.requiredRole} role is required for this intervention`);
+    }
+    if (pending.humanLease) {
+      if (pending.humanLease.ownerId !== actor.id) {
+        throw new HandoffError("HANDOFF_STATE_INVALID", "Another operator already controls this intervention");
+      }
+      return pending.progress;
+    }
+    pending.humanLease = await this.#control.takeHumanControl(actor.id);
+    pending.progress = this.#humanProgress(pending, "human_active");
+    await this.#record("intervention.taken", { interventionId, actorId: actor.id });
+    return pending.progress;
+  }
+
+  async performHumanAction(
+    interventionId: string,
+    actor: ApprovalActor,
+    action: "restore_session" | "authenticate_supervisor",
+  ): Promise<ReplayProgressV2> {
+    const pending = this.#assertHumanPending(interventionId);
+    if (pending.rule.handoff?.action !== action) {
+      throw new HandoffError("HANDOFF_ACTION_INVALID", "The requested intervention action is not allowed");
+    }
+    const lease = this.#assertHumanLease(pending, actor);
+    if (pending.actionCompleted) return pending.progress;
+    const execute = action === "restore_session"
+      ? this.#options.restoreSession
+      : this.#options.authenticateSupervisor;
+    if (!execute) throw new HandoffError("HANDOFF_STATE_INVALID", "The intervention action is not configured");
+    await this.#control.recordHumanAction(lease, action, execute);
+    pending.actionCompleted = true;
+    pending.progress = this.#humanProgress(pending, "action_completed");
+    await this.#record("intervention.action_completed", { interventionId, action });
+    return pending.progress;
+  }
+
+  async resumeHuman(interventionId: string, actor: ApprovalActor): Promise<ReplayProgressV2> {
+    const pending = this.#assertHumanPending(interventionId);
+    const lease = this.#assertHumanLease(pending, actor);
+    if (
+      !pending.actionCompleted ||
+      pending.progress.intervention.state !== "action_completed"
+    ) {
+      throw new HandoffError("HANDOFF_STATE_INVALID", "The required intervention action has not completed");
+    }
+    pending.progress = this.#humanProgress(pending, "revalidating");
+    this.#automationLease = await this.#control.resumeAutomation(lease);
+    try {
+      if (
+        this.#runtime.sessionId !== pending.originalSessionId ||
+        this.#runtime.sessionRef !== pending.originalSessionRef
+      ) {
+        throw new Error("The live runtime session changed during intervention");
+      }
+      const pageState = await this.#withAutomation(() => this.#runtime.pageState());
+      const routeFailure = this.#assertRoute(pageState);
+      if (routeFailure) throw new Error(routeFailure);
+      const handoff = pending.rule.handoff;
+      if (!handoff) throw new Error("The intervention directive is missing");
+      for (const condition of handoff.revalidate) {
+        const result = await this.#withAutomation(() => this.#runtime.evaluate(condition, this.#context));
+        if (!result.matched) throw new Error("The restored route or authentication state could not be verified");
+      }
+      const staleState = await this.#withAutomation(() => this.#runtime.evaluate(pending.rule.condition, this.#context));
+      if (staleState.matched) throw new Error("The triggering intervention marker is still present");
+      if (
+        pending.rule.requiredRole &&
+        this.#options.currentPrincipalRole?.() !== pending.rule.requiredRole
+      ) {
+        throw new Error("The required target-session principal was not established");
+      }
+    } catch (error) {
+      this.#pendingHuman = undefined;
+      await this.#record("intervention.revalidation_failed", {
+        interventionId,
+        message: error instanceof Error ? error.message : "Session revalidation failed",
+      });
+      return this.#terminalProgress(
+        await this.#failure(
+          "HANDOFF_REVALIDATION_FAILED",
+          "The same live session could not be safely revalidated after intervention",
+          pending.step,
+          false,
+        ),
+      );
+    }
+    await this.#capture(`intervention-revalidated-${pending.rule.code}`);
+    await this.#record("intervention.revalidated", {
+      interventionId,
+      reasonCode: pending.rule.code,
+      sameLiveSession: true,
+    });
+    this.#resetForHandoffResume();
+    this.#pendingHuman = undefined;
+    this.#options.onPhase?.("running", { resumedFrom: pending.rule.code });
+    return this.#drive();
   }
 
   approvalBinding(): ApprovalBinding | undefined {
     return this.#pending ? { ...this.#pending.binding } : undefined;
+  }
+
+  intervention(): Extract<ReplayProgressV2, { status: "awaiting_human" }>["intervention"] | undefined {
+    return this.#pendingHuman ? { ...this.#pendingHuman.progress.intervention } : undefined;
   }
 
   async #drive(): Promise<ReplayProgressV2> {
@@ -266,13 +447,23 @@ export class ReplayRunnerV2 {
         return this.#terminalProgress(await this.#failure("TIMEOUT", "Run time budget was exhausted", step, false));
       }
 
-      const routeFailure = this.#assertRoute(await this.#runtime.pageState());
+      const principalIntervention = this.#principalIntervention();
+      if (principalIntervention) {
+        const disposition = await this.#applyState(principalIntervention, step);
+        if (disposition.kind === "terminal") return this.#terminalProgress(disposition.result);
+        if (disposition.kind === "pause") return disposition.progress;
+        this.#stepIndex = disposition.stepIndex;
+        continue;
+      }
+
+      const routeFailure = this.#assertRoute(await this.#withAutomation(() => this.#runtime.pageState()));
       if (routeFailure) return this.#terminalProgress(await this.#failure("POLICY_ROUTE_DENIED", routeFailure, step, false));
 
       const declared = await this.#detectState();
       if (declared) {
         const disposition = await this.#applyState(declared, step);
         if (disposition.kind === "terminal") return this.#terminalProgress(disposition.result);
+        if (disposition.kind === "pause") return disposition.progress;
         this.#stepIndex = disposition.stepIndex;
         continue;
       }
@@ -290,6 +481,7 @@ export class ReplayRunnerV2 {
 
       const execution = await this.#executeStep(step);
       if (execution) return this.#terminalProgress(execution);
+      if (this.#pendingHuman) return this.#pendingHuman.progress;
       if (this.#recoveryRedirected) {
         this.#recoveryRedirected = false;
         continue;
@@ -299,12 +491,13 @@ export class ReplayRunnerV2 {
       this.#stepIndex += 1;
     }
 
-    const checkpoint = await this.#runtime.evaluate(this.#artifact.checkpoint, this.#context);
+    const checkpoint = await this.#withAutomation(() => this.#runtime.evaluate(this.#artifact.checkpoint, this.#context));
     if (!checkpoint.matched) {
       const state = await this.#detectState();
       if (state) {
         const disposition = await this.#applyState(state, this.#artifact.steps.at(-1));
         if (disposition.kind === "terminal") return this.#terminalProgress(disposition.result);
+        if (disposition.kind === "pause") return disposition.progress;
         this.#stepIndex = disposition.stepIndex;
         return this.#drive();
       }
@@ -382,8 +575,8 @@ export class ReplayRunnerV2 {
       }
       try {
         this.#markEffectAttempt(step);
-        const receipt = await this.#runtime.act(step.action, this.#context);
-        const routeFailure = this.#assertRoute(await this.#runtime.pageState());
+        const receipt = await this.#withAutomation(() => this.#runtime.act(step.action, this.#context));
+        const routeFailure = this.#assertRoute(await this.#withAutomation(() => this.#runtime.pageState()));
         if (routeFailure) throw new Error(routeFailure);
         const state = await this.#detectState();
         if (state) {
@@ -399,14 +592,26 @@ export class ReplayRunnerV2 {
               true,
             );
           }
+          if (state.rule.category === "intervention" && this.#effectAttempts.size > 0) {
+            return this.#failure(
+              "EFFECT_UNKNOWN",
+              `The target reported ${state.rule.code} after a write attempt; same-session handoff is forbidden`,
+              step,
+              false,
+              true,
+            );
+          }
           if (EFFECT_RANK[step.effect] >= EFFECT_RANK.reversible_write) this.#effectAttempts.delete(this.#stepIndex);
           const disposition = await this.#applyState(state, step);
           if (disposition.kind === "terminal") return disposition.result;
+          if (disposition.kind === "pause") return undefined;
           this.#stepIndex = disposition.stepIndex;
           this.#recoveryRedirected = true;
           return undefined;
         }
-        const postcondition = await this.#runtime.waitFor(step.postcondition, this.#context, step.timeoutMs);
+        const postcondition = await this.#withAutomation(() =>
+          this.#runtime.waitFor(step.postcondition, this.#context, step.timeoutMs),
+        );
         if (!postcondition.matched) {
           throw new StepPostconditionError(
             step.postconditionFailureCode ?? "POSTCONDITION_FAILED",
@@ -469,7 +674,7 @@ export class ReplayRunnerV2 {
     const binding: ApprovalBinding = {
       challengeId,
       runId: this.#runId,
-      artifactDigest: this.#artifactDigest,
+      artifactDigest: this.#approvalArtifactDigest,
       inputDigest: this.#inputDigest,
       sessionRef: this.#runtime.sessionRef,
       stepId: step.id,
@@ -509,6 +714,7 @@ export class ReplayRunnerV2 {
     if (!step.approval) throw new Error("Approval snapshot requested for an unapproved step");
     const summary: ApprovalSnapshot["summary"] = [];
     for (const targetId of step.approval.summaryTargets) {
+      this.#control.assertLease(this.#automationLease);
       const target = this.#runtime.getTarget(targetId);
       const value = await this.#extractApprovalValue(
         step,
@@ -519,6 +725,7 @@ export class ReplayRunnerV2 {
       if (target.sensitive) registerSensitiveRuntimeValue(this.#options.redactor, value);
       summary.push({ targetId, value, sensitive: target.sensitive });
     }
+    this.#control.assertLease(this.#automationLease);
     const nonceTarget = this.#runtime.getTarget(step.approval.stateNonceTarget);
     const stateNonce = await this.#extractApprovalValue(
       step,
@@ -542,9 +749,11 @@ export class ReplayRunnerV2 {
   ): Promise<RuntimeValue> {
     const bindingName = `approval:${purpose}:${step.id}:${targetId}`;
     try {
-      const receipt = await this.#runtime.act(
-        { kind: "extract", targetId, bindingName, source },
-        this.#context,
+      const receipt = await this.#withAutomation(() =>
+        this.#runtime.act(
+          { kind: "extract", targetId, bindingName, source },
+          this.#context,
+        ),
       );
       if (receipt.value === undefined) throw new Error(`Approval ${purpose} target did not return a value`);
       return receipt.value;
@@ -568,10 +777,25 @@ export class ReplayRunnerV2 {
   async #detectState(): Promise<DetectedState | undefined> {
     const rules = [...this.#artifact.runtimeStates].sort((left, right) => right.priority - left.priority);
     for (const rule of rules) {
-      const result = await this.#runtime.evaluate(rule.condition, this.#context);
+      const result = await this.#withAutomation(() => this.#runtime.evaluate(rule.condition, this.#context));
       if (result.matched) return { rule };
     }
     return undefined;
+  }
+
+  #principalIntervention(): DetectedState | undefined {
+    if (this.#artifact.capability.risk !== "supervisor_only") return undefined;
+    const currentRole = this.#options.currentPrincipalRole?.();
+    if (!currentRole) return undefined;
+    const rule = [...this.#artifact.runtimeStates]
+      .sort((left, right) => right.priority - left.priority)
+      .find(
+        (candidate) =>
+          candidate.category === "intervention" &&
+          candidate.handoff?.trigger?.kind === "capability_role" &&
+          candidate.handoff.trigger.role !== currentRole,
+      );
+    return rule ? { rule } : undefined;
   }
 
   async #applyState(state: DetectedState, step?: StepV2): Promise<StateDisposition> {
@@ -610,6 +834,7 @@ export class ReplayRunnerV2 {
         }),
       };
     }
+    if (rule.category === "intervention") return this.#pauseForHuman(rule, step);
 
     const recovery = rule.recovery;
     if (!recovery) return { kind: "terminal", result: await this.#failure(rule.code, rule.description, step, false) };
@@ -654,8 +879,8 @@ export class ReplayRunnerV2 {
     if (recovery.waitMs > 0) await this.#sleep(recovery.waitMs);
     if (recovery.action) {
       try {
-        await this.#runtime.act(recovery.action, this.#context);
-        const routeFailure = this.#assertRoute(await this.#runtime.pageState());
+        await this.#withAutomation(() => this.#runtime.act(recovery.action!, this.#context));
+        const routeFailure = this.#assertRoute(await this.#withAutomation(() => this.#runtime.pageState()));
         if (routeFailure) {
           return { kind: "terminal", result: await this.#failure("RECOVERY_ROUTE_DENIED", routeFailure, step, false) };
         }
@@ -713,6 +938,128 @@ export class ReplayRunnerV2 {
     }
   }
 
+  async #pauseForHuman(rule: RuntimeStateRuleV2, step?: StepV2): Promise<StateDisposition> {
+    const handoff = rule.handoff;
+    if (!handoff) {
+      return { kind: "terminal", result: await this.#failure("ARTIFACT_INVALID", "Intervention handoff is missing", step, false) };
+    }
+    if (this.#effectAttempts.size > 0) {
+      return {
+        kind: "terminal",
+        result: await this.#failure(
+          "EFFECT_UNKNOWN",
+          `The target reported ${rule.code} after a write attempt; same-session handoff is forbidden`,
+          step,
+          false,
+          true,
+        ),
+      };
+    }
+    await this.#capture(`handoff-requested-${rule.code}`);
+    const incident: RunIncidentV2 = {
+      code: rule.code,
+      category: "intervention",
+      message: rule.description,
+      ...(step ? { stepId: step.id } : {}),
+      occurredAt: this.#now().toISOString(),
+    };
+    this.#incidents.push(incident);
+    const request = await this.#control.requestIntervention({
+      runId: this.#runId,
+      capabilityId: this.#artifact.capability.id,
+      goal: "Complete the declared intervention and return to the approved resume route",
+      stepId: step?.id ?? "checkpoint",
+      reasonCode: rule.code,
+      reason: rule.description,
+      screenshotPath: this.#evidencePaths.at(-2) ?? "not-captured",
+      observedState: rule.code,
+    });
+    const createdAt = this.#now();
+    const expiresAtMs = createdAt.getTime() + handoff.expiresInMs;
+    const progress: Extract<ReplayProgressV2, { status: "awaiting_human" }> = {
+      status: "awaiting_human",
+      phase: "awaiting_human",
+      intervention: {
+        interventionId: request.interventionId,
+        runId: this.#runId,
+        stepId: step?.id ?? "checkpoint",
+        reasonCode: rule.code,
+        action: handoff.action,
+        ...(rule.requiredRole ? { requiredRole: rule.requiredRole } : {}),
+        state: "awaiting_human",
+        createdAt: createdAt.toISOString(),
+        expiresAt: new Date(expiresAtMs).toISOString(),
+        sameLiveSession: true,
+      },
+      journal: this.#journal.map((entry) => ({ ...entry, evidencePaths: [...entry.evidencePaths] })),
+      incidents: this.#incidents.map((item) => ({ ...item })),
+    };
+    this.#pendingHuman = {
+      rule,
+      ...(step ? { step } : {}),
+      originalSessionId: this.#runtime.sessionId,
+      originalSessionRef: this.#runtime.sessionRef,
+      expiresAtMs,
+      progress,
+      actionCompleted: false,
+    };
+    return { kind: "pause", progress };
+  }
+
+  #assertHumanPending(interventionId: string): PendingHuman {
+    const pending = this.#pendingHuman;
+    if (!pending || pending.progress.intervention.interventionId !== interventionId) {
+      throw new HandoffError("HANDOFF_MISMATCH", "The intervention does not match this run");
+    }
+    if (pending.expiresAtMs <= this.#now().getTime()) {
+      throw new HandoffError("HANDOFF_EXPIRED", "The intervention has expired");
+    }
+    return pending;
+  }
+
+  #assertHumanLease(pending: PendingHuman, actor: ApprovalActor): ControlLease {
+    const lease = pending.humanLease;
+    if (!lease || lease.ownerId !== actor.id) {
+      throw new HandoffError("HANDOFF_STATE_INVALID", "The active operator does not own this intervention");
+    }
+    this.#control.assertLease(lease);
+    return lease;
+  }
+
+  #humanProgress(
+    pending: PendingHuman,
+    state: "awaiting_human" | "human_active" | "action_completed" | "revalidating",
+  ): Extract<ReplayProgressV2, { status: "awaiting_human" }> {
+    return {
+      status: "awaiting_human",
+      phase: "awaiting_human",
+      intervention: { ...pending.progress.intervention, state },
+      journal: this.#journal.map((entry) => ({ ...entry, evidencePaths: [...entry.evidencePaths] })),
+      incidents: this.#incidents.map((incident) => ({ ...incident })),
+    };
+  }
+
+  #resetForHandoffResume(): void {
+    for (const key of Object.keys(this.#context.bindings)) delete this.#context.bindings[key];
+    for (const key of Object.keys(this.#outputs)) delete this.#outputs[key];
+    this.#pending = undefined;
+    this.#approvedSteps.clear();
+    this.#approvedBindings.clear();
+    this.#recoveryAttempts.clear();
+    this.#effectAttempts.clear();
+    this.#bindingSnapshots.clear();
+    this.#outputStepIndices.clear();
+    this.#stepIndex = 0;
+    this.#recoveryRedirected = false;
+  }
+
+  async #withAutomation<T>(operation: () => Promise<T>): Promise<T> {
+    this.#control.assertLease(this.#automationLease);
+    const result = await operation();
+    this.#control.assertLease(this.#automationLease);
+    return result;
+  }
+
   #invalidateFrom(stepIndex: number): void {
     const snapshot = this.#bindingSnapshots.get(stepIndex) ?? (Object.create(null) as Record<string, RuntimeValue>);
     for (const key of Object.keys(this.#context.bindings)) delete this.#context.bindings[key];
@@ -767,7 +1114,7 @@ export class ReplayRunnerV2 {
 
   async #firstUnmatched(conditions: StepV2["preconditions"]): Promise<string | undefined> {
     for (const condition of conditions) {
-      const result = await this.#runtime.evaluate(condition, this.#context);
+      const result = await this.#withAutomation(() => this.#runtime.evaluate(condition, this.#context));
       if (!result.matched) return result.summary;
     }
     return undefined;
@@ -789,7 +1136,7 @@ export class ReplayRunnerV2 {
       spec.classification === "restricted" ||
       spec.classification === "secret"
     ) {
-      registerSensitiveRuntimeValue(this.#options.redactor, value);
+      registerSensitiveRuntimeValue(this.#options.redactor, value, 0, "exact");
     }
   }
 
@@ -868,6 +1215,9 @@ export class ReplayRunnerV2 {
       retryable,
       ...(step ? { stepId: step.id } : {}),
       effectUncertain: reconciliationRequired,
+      ...(reconciliationRequired && Object.keys(this.#outputs).length > 0
+        ? { reconciliationOutputs: { ...this.#outputs } }
+        : {}),
     });
   }
 
@@ -881,6 +1231,7 @@ export class ReplayRunnerV2 {
       capabilityId: this.#artifact.capability.id,
       capabilityVersion: this.#artifact.capability.version,
       artifactDigest: this.#artifactDigest,
+      ...(this.#targetProfileDigest ? { targetProfileDigest: this.#targetProfileDigest } : {}),
       inputDigest: this.#inputDigest,
       sessionRef: this.#runtime.sessionRef,
       startedAt: this.#startedAt,
@@ -899,11 +1250,11 @@ export class ReplayRunnerV2 {
   async #capture(label: string): Promise<void> {
     const evidence = this.#options.evidence;
     if (!evidence) return;
-    const screenshot = await evidence.saveMaskedScreenshot(label, await this.#runtime.captureMaskedScreenshot(), {
+    const screenshot = await evidence.saveMaskedScreenshot(label, await this.#withAutomation(() => this.#runtime.captureMaskedScreenshot()), {
       masked: true,
       mimeType: "image/png",
     });
-    const dom = await evidence.saveDomSnapshot(label, await this.#runtime.sanitizedDomSnapshot());
+    const dom = await evidence.saveDomSnapshot(label, await this.#withAutomation(() => this.#runtime.sanitizedDomSnapshot()));
     this.#evidencePaths.push(screenshot.path, dom.path);
     await this.#record("evidence.captured", { label, evidenceIds: [screenshot.id, dom.id] });
   }

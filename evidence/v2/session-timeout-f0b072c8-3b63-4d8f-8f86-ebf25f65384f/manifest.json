@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "runId": "session-timeout-f0b072c8-3b63-4d8f-8f86-ebf25f65384f",
+  "createdAt": "2026-08-21T07:26:23.542Z",
+  "metadata": {
+    "evidenceVersion": "v2",
+    "mode": "hosted-meridian-scenario",
+    "scenario": "session-timeout",
+    "status": "verified",
+    "artifactDigests": [
+      "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a"
+    ],
+    "targetProfileDigest": "eab9d160d7b767431005e20eb6cdffd3667f023e67a520de125c9362513674cb",
+    "plannerCallsAllowed": false,
+    "target": "hosted_meridian"
+  },
+  "evidence": [
+    {
+      "id": "8361b3c4-0583-4212-82ca-3ed54c561691",
+      "kind": "screenshot",
+      "path": "screenshots/completion.png",
+      "mimeType": "image/png",
+      "sha256": "dfc04cd50d70997f2c3da83a6c1af9168fa0b895bc783d22d5fa1b6d17017aa1",
+      "bytes": 13751,
+      "createdAt": "2026-08-21T07:26:22.608Z",
+      "masked": true
+    },
+    {
+      "id": "9f6d09ff-825c-4b5c-986a-b33881f8299d",
+      "kind": "dom",
+      "path": "dom/completion.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "0f74ebb3400fee43af981217c846228df53b36c6f02a3ce4421385e7ccb3af1f",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:22.642Z",
+      "redacted": true
+    },
+    {
+      "id": "8c332b3e-6f2d-43ee-a885-462b8cbca874",
+      "kind": "screenshot",
+      "path": "screenshots/handoff-requested-session_expired.png",
+      "mimeType": "image/png",
+      "sha256": "f0586f1e72795bbfa14c5bf38b5ad03e0fdd23194660269c2ac4c4010e4bf5d8",
+      "bytes": 10655,
+      "createdAt": "2026-08-21T07:26:23.410Z",
+      "masked": true
+    },
+    {
+      "id": "ac7976c5-406c-4026-9c5f-b8b5fbffa2f5",
+      "kind": "dom",
+      "path": "dom/handoff-requested-session_expired.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "843532617e6f0d2ce4c6bb156735e4544227146ca35fd6b573b1859aff9e95e7",
+      "bytes": 1845,
+      "createdAt": "2026-08-21T07:26:23.438Z",
+      "redacted": true
+    },
+    {
+      "id": "c79355df-49e7-478a-b1b9-d1d5cd27cbdb",
+      "kind": "json",
+      "path": "data/scenario-summary.json",
+      "mimeType": "application/json",
+      "sha256": "0ad4d6b20e84f2ae95db8cf70647a53cc4439cb77f9bb97025186056464f50e4",
+      "bytes": 396,
+      "createdAt": "2026-08-21T07:26:23.538Z",
+      "redacted": true
+    },
+    {
+      "id": "9976356c-c13d-45f3-a6f1-6adbb28c44ce",
+      "kind": "json",
+      "path": "events.jsonl",
+      "mimeType": "application/x-ndjson; charset=utf-8",
+      "sha256": "d3d6bf6f26b002a5c3b4e327b3ce1ee5e2ce724d98d7b7a075215b009ee1f688",
+      "bytes": 15765,
+      "createdAt": "2026-08-21T07:26:23.541Z",
+      "redacted": true
+    }
+  ]
+}

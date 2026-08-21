@@ -1,0 +1,22 @@
+{
+  "scenario": "balance-success",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "member.get_record_and_balances",
+    "outputKeys": [
+      "address",
+      "email",
+      "member_name",
+      "member_number",
+      "phone",
+      "shares"
+    ],
+    "incidentCodes": []
+  },
+  "assertion": {
+    "typedShareSet": true,
+    "shareCount": 20
+  },
+  "plannerCallsAllowed": false
+}

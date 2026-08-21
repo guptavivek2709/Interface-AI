@@ -1,0 +1,16 @@
+{
+  "scenario": "validation-rejected",
+  "status": "verified",
+  "observation": {
+    "status": "business_outcome",
+    "code": "VALIDATION_REJECTED",
+    "capabilityId": "member.get_record_and_balances",
+    "incidentCodes": []
+  },
+  "assertion": {
+    "injectedFault": true,
+    "naturalBusinessOutcome": false,
+    "effectApplied": false
+  },
+  "plannerCallsAllowed": false
+}

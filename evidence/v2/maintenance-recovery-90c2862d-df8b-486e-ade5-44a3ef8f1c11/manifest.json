@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "runId": "maintenance-recovery-90c2862d-df8b-486e-ade5-44a3ef8f1c11",
+  "createdAt": "2026-08-21T07:26:20.429Z",
+  "metadata": {
+    "evidenceVersion": "v2",
+    "mode": "hosted-meridian-scenario",
+    "scenario": "maintenance-recovery",
+    "status": "verified",
+    "artifactDigests": [
+      "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a"
+    ],
+    "targetProfileDigest": "eab9d160d7b767431005e20eb6cdffd3667f023e67a520de125c9362513674cb",
+    "plannerCallsAllowed": false,
+    "target": "hosted_meridian"
+  },
+  "evidence": [
+    {
+      "id": "c99d624d-a9c9-4e44-8d4c-d2562055e558",
+      "kind": "screenshot",
+      "path": "screenshots/completion.png",
+      "mimeType": "image/png",
+      "sha256": "dfc04cd50d70997f2c3da83a6c1af9168fa0b895bc783d22d5fa1b6d17017aa1",
+      "bytes": 13751,
+      "createdAt": "2026-08-21T07:26:17.386Z",
+      "masked": true
+    },
+    {
+      "id": "8d8759ab-e6d6-48bc-9f6e-5e36a8dbb60e",
+      "kind": "dom",
+      "path": "dom/completion.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "0f74ebb3400fee43af981217c846228df53b36c6f02a3ce4421385e7ccb3af1f",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:17.409Z",
+      "redacted": true
+    },
+    {
+      "id": "4e70cc80-0341-447d-844c-3ac73bbdeb63",
+      "kind": "screenshot",
+      "path": "screenshots/recovery-maintenance-1.png",
+      "mimeType": "image/png",
+      "sha256": "1a71357fc3a339ac90f717b0e9743d8af923c12f86e995b0d69fb16d05d04356",
+      "bytes": 13143,
+      "createdAt": "2026-08-21T07:26:18.018Z",
+      "masked": true
+    },
+    {
+      "id": "149bfa5e-404c-4839-bdd5-1b122d36382e",
+      "kind": "dom",
+      "path": "dom/recovery-maintenance-1.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "9920b8796244de4bc93ac59b427c030888e38f09fa1c72862cb78467993556ca",
+      "bytes": 2378,
+      "createdAt": "2026-08-21T07:26:18.036Z",
+      "redacted": true
+    },
+    {
+      "id": "f797a3c1-7ff2-41a6-b5c0-be10d54bb4ae",
+      "kind": "screenshot",
+      "path": "screenshots/completion-2.png",
+      "mimeType": "image/png",
+      "sha256": "2bae7044caad3c1d81347b89fbf726e68ebf195508b79eb735a21295a24d0053",
+      "bytes": 18027,
+      "createdAt": "2026-08-21T07:26:20.174Z",
+      "masked": true
+    },
+    {
+      "id": "57016160-2e0f-407b-8b7a-2a171b76b5d0",
+      "kind": "dom",
+      "path": "dom/completion-2.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "a5ee720d0767f8145b939b583f5b6b6522969cd484b2e28e74048fc6d8a3e807",
+      "bytes": 2874,
+      "createdAt": "2026-08-21T07:26:20.192Z",
+      "redacted": true
+    },
+    {
+      "id": "e265a944-290c-4ff1-9bf8-4bf107212ead",
+      "kind": "json",
+      "path": "data/scenario-summary.json",
+      "mimeType": "application/json",
+      "sha256": "071325cc86d01ea65a784dd3c2da7364a6aeec2bd6f95f87ecff668b8e52aea1",
+      "bytes": 493,
+      "createdAt": "2026-08-21T07:26:20.425Z",
+      "redacted": true
+    },
+    {
+      "id": "76996951-b0c8-4b1b-9d7a-dddddb3ee686",
+      "kind": "json",
+      "path": "events.jsonl",
+      "mimeType": "application/x-ndjson; charset=utf-8",
+      "sha256": "f2f76f7cc79ecc420008476c05ed50e4cfe78d740727dc6470c597f143cd9c44",
+      "bytes": 27954,
+      "createdAt": "2026-08-21T07:26:20.429Z",
+      "redacted": true
+    }
+  ]
+}

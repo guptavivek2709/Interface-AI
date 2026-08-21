@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "runId": "share-open-success-c6d54208-11a6-42ae-a8d4-32fa75469680",
+  "createdAt": "2026-08-21T07:26:46.687Z",
+  "metadata": {
+    "evidenceVersion": "v2",
+    "mode": "hosted-meridian-scenario",
+    "scenario": "share-open-success",
+    "status": "verified",
+    "artifactDigests": [
+      "bab443099ab6d49c71124469c80e1c5e2333dd6ac869327d36bd62f70dc55a1b",
+      "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a"
+    ],
+    "targetProfileDigest": "eab9d160d7b767431005e20eb6cdffd3667f023e67a520de125c9362513674cb",
+    "plannerCallsAllowed": false,
+    "target": "hosted_meridian"
+  },
+  "evidence": [
+    {
+      "id": "c497e318-bd8d-4a3e-ba70-743a44798023",
+      "kind": "screenshot",
+      "path": "screenshots/completion.png",
+      "mimeType": "image/png",
+      "sha256": "dfc04cd50d70997f2c3da83a6c1af9168fa0b895bc783d22d5fa1b6d17017aa1",
+      "bytes": 13751,
+      "createdAt": "2026-08-21T07:26:41.690Z",
+      "masked": true
+    },
+    {
+      "id": "2534c62a-ebad-4762-a821-6a4416aa2030",
+      "kind": "dom",
+      "path": "dom/completion.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "0f74ebb3400fee43af981217c846228df53b36c6f02a3ce4421385e7ccb3af1f",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:41.720Z",
+      "redacted": true
+    },
+    {
+      "id": "d4a94e56-a4aa-48dd-bd9f-70b4df2d6329",
+      "kind": "screenshot",
+      "path": "screenshots/approval-commit_new_share.png",
+      "mimeType": "image/png",
+      "sha256": "73f3b2a719fec03b5e79d0a71c819351cb6eb2f75dbf6aff44e2bf613a7a084d",
+      "bytes": 14243,
+      "createdAt": "2026-08-21T07:26:43.305Z",
+      "masked": true
+    },
+    {
+      "id": "7b1d15d4-ae70-422e-817c-adf22e01c25c",
+      "kind": "dom",
+      "path": "dom/approval-commit_new_share.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "afb3a365c01096827fb873a72798d9c711a6908002b6eb84e5ad387f7c3dc910",
+      "bytes": 2493,
+      "createdAt": "2026-08-21T07:26:43.316Z",
+      "redacted": true
+    },
+    {
+      "id": "a4b80506-262f-4379-a20e-93f70955e1b8",
+      "kind": "screenshot",
+      "path": "screenshots/completion-2.png",
+      "mimeType": "image/png",
+      "sha256": "d8e8ae15fa9bd050963b681da1b6d372b2cfe4892654f76732f738d37df9b08d",
+      "bytes": 15384,
+      "createdAt": "2026-08-21T07:26:44.156Z",
+      "masked": true
+    },
+    {
+      "id": "a2ad31b4-f974-4586-9b48-2008fc2c4fe9",
+      "kind": "dom",
+      "path": "dom/completion-2.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "ae6b15d6114bc3c79811bc01b9992b8b5cf82a554be6f9727f175555284bf75d",
+      "bytes": 2513,
+      "createdAt": "2026-08-21T07:26:44.165Z",
+      "redacted": true
+    },
+    {
+      "id": "544f39cb-5baf-401d-936b-8cef109f4e1c",
+      "kind": "screenshot",
+      "path": "screenshots/completion-3.png",
+      "mimeType": "image/png",
+      "sha256": "fcbb2e816e20149b3ed8e8da751c11ef6cbdbc3c7158e326b67090183f80db19",
+      "bytes": 18029,
+      "createdAt": "2026-08-21T07:26:46.608Z",
+      "masked": true
+    },
+    {
+      "id": "69a3449a-3c10-470f-880c-6c3631294086",
+      "kind": "dom",
+      "path": "dom/completion-3.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "a5ee720d0767f8145b939b583f5b6b6522969cd484b2e28e74048fc6d8a3e807",
+      "bytes": 2874,
+      "createdAt": "2026-08-21T07:26:46.620Z",
+      "redacted": true
+    },
+    {
+      "id": "45666145-57be-4c71-95f9-dc8c1b404f69",
+      "kind": "json",
+      "path": "data/scenario-summary.json",
+      "mimeType": "application/json",
+      "sha256": "6555b0919ca90accbc89a931b78abaab8d6f7bdbcc3a933ef7971001d7ec8d36",
+      "bytes": 520,
+      "createdAt": "2026-08-21T07:26:46.683Z",
+      "redacted": true
+    },
+    {
+      "id": "f260f91e-c0f1-42f1-9895-d98a46d15697",
+      "kind": "json",
+      "path": "events.jsonl",
+      "mimeType": "application/x-ndjson; charset=utf-8",
+      "sha256": "2c77b56a7372920eb8da7ba906172d48863ddd647d11cd26b7d1b2ae3d93481e",
+      "bytes": 40505,
+      "createdAt": "2026-08-21T07:26:46.687Z",
+      "redacted": true
+    }
+  ]
+}

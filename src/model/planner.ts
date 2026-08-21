@@ -15,7 +15,7 @@ export const PlannerActionSchema = z
     targetRef: z.string().nullable(),
     value: PlannerValueSchema.nullable(),
     outputName: z.string().nullable(),
-    outputType: z.enum(["string", "money"]).nullable(),
+    outputType: z.enum(["string", "money", "table"]).nullable(),
     key: z.string().nullable(),
   })
   .strict();
@@ -123,6 +123,20 @@ function symbolize(
   substitutions: readonly InputSubstitution[],
 ): string | null {
   if (value === null) return null;
+  return value
+    .split(/(\{\{[A-Za-z0-9._:-]+\}\})/gu)
+    .map((part) =>
+      /^\{\{[A-Za-z0-9._:-]+\}\}$/u.test(part)
+        ? part
+        : symbolizeUnprotected(part, substitutions),
+    )
+    .join("");
+}
+
+function symbolizeUnprotected(
+  value: string,
+  substitutions: readonly InputSubstitution[],
+): string {
   let result = value;
   for (const { variant, placeholder } of substitutions) {
     if (variant.length < 3) {
@@ -152,6 +166,33 @@ export function plannerPrompt(request: PlannerRequest): string {
     value: symbolize(control.value, substitutions),
     disabled: control.disabled,
   }));
+  const semanticTargets = (request.observation.semanticTargets ?? []).map((target) => ({
+    ref: target.ref,
+    frame: target.framePath.map((frame) => symbolize(frame.title, substitutions)),
+    kind: target.kind,
+    name: symbolize(target.name, substitutions),
+    ...(target.kind === "label_value"
+      ? { label: symbolize(target.label, substitutions), valueCellOffset: target.valueCellOffset }
+      : {}),
+    ...(target.kind === "table" || target.kind === "table_row_value" || target.kind === "table_row_control"
+      ? { headers: target.headers.map((header) => symbolize(header, substitutions)) }
+      : {}),
+    ...(target.kind === "table_row_value"
+      ? {
+          keyColumn: symbolize(target.keyColumn, substitutions),
+          keyInputName: target.keyInputName,
+          valueColumn: symbolize(target.valueColumn, substitutions),
+        }
+      : {}),
+    ...(target.kind === "table_row_control"
+      ? {
+          keyColumn: symbolize(target.keyColumn, substitutions),
+          keyInputName: target.keyInputName,
+          controlRole: target.controlRole,
+          controlName: symbolize(target.controlName, substitutions),
+        }
+      : {}),
+  }));
   const frames = request.observation.frames.map((frame) => ({
     frame: frame.framePath.map((item) => symbolize(item.title, substitutions)),
     url: symbolize(frame.url, substitutions),
@@ -168,11 +209,14 @@ export function plannerPrompt(request: PlannerRequest): string {
   return [
     "You are the discovery planner for a safe computer-use recorder.",
     "Decide exactly ONE next UI action from the attached screenshot and the compact accessibility observation.",
-    "Do not call tools, browse, or invent control refs. Use only a ref listed under controls.",
-    "The UI is a synthetic training bank. All values are fake. Never click a final Create/Confirm/Submit transaction control.",
+    "Do not call tools, browse, or invent target refs. Use only a ref listed under controls or semantic targets.",
+    "The UI is the authorized hosted MERIDIAN training target. Never click a final Create/Confirm/Submit transaction control during discovery.",
     "Use value.kind=input and value.name=<input key> for caller-supplied values; never copy an input as a literal.",
-    "Use extract on review outputs requested by the goal, with a stable camelCase outputName and outputType string or money.",
-    "Extract exactly the output keys requested by the goal. Do not invent summary/banner/status outputs.",
+    "Use extract on requested outputs. Choose a label_value semantic target for a labeled field, or a table semantic target with outputType table for structured rows.",
+    "Use a table_row_control semantic target when repeated row controls share a name; its row key is already bound to the named caller input.",
+    "Use a table_row_value semantic target to extract one scalar cell from the row keyed by a named caller input; preserve the exact requested outputName.",
+    "For scalar extracts choose outputType string or money and copy outputName exactly from the GOAL, including underscores.",
+    "Extract exactly the output keys requested by the goal. Do not rename them or invent summary/banner/status outputs.",
     "Choose finish only after the visible goal checkpoint is reached and requested outputs were extracted.",
     "Choose escalate when safe progress is impossible. Keep reason concise and never repeat sensitive values.",
     `Step ${request.currentStep} of at most ${request.maxSteps}.`,
@@ -181,6 +225,7 @@ export function plannerPrompt(request: PlannerRequest): string {
     `HISTORY: ${JSON.stringify(history)}`,
     `FRAMES: ${JSON.stringify(frames)}`,
     `CONTROLS: ${JSON.stringify(controls)}`,
+    `SEMANTIC TARGETS: ${JSON.stringify(semanticTargets)}`,
   ].join("\n\n");
 }
 

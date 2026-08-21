@@ -118,6 +118,7 @@ function registeredVariants(value: string): string[] {
 export class Redactor {
   readonly replacement: string;
   private readonly sensitiveValues = new Set<string>();
+  private readonly exactSensitiveValues = new Set<string>();
   private readonly sensitiveKeys = new Set<string>();
 
   constructor(options: RedactorOptions = {}) {
@@ -138,6 +139,25 @@ export class Redactor {
     return this;
   }
 
+  /**
+   * Register a structured runtime value without treating it as an arbitrary
+   * substring. This is used for low-entropy extracted outputs such as `OPEN`:
+   * the value itself remains protected, while stable keys and capability IDs
+   * such as `opening_balance` and `share.open` remain intact.
+   */
+  registerExact(value: string | null | undefined): this {
+    if (typeof value !== "string" || value.length === 0) return this;
+    for (const variant of registeredVariants(value)) {
+      this.exactSensitiveValues.add(variant.toLocaleLowerCase("en-US"));
+    }
+    return this;
+  }
+
+  registerManyExact(values: Iterable<string | null | undefined>): this {
+    for (const value of values) this.registerExact(value);
+    return this;
+  }
+
   registerKey(key: string): this {
     if (key.length > 0) this.sensitiveKeys.add(normalizeKey(key));
     return this;
@@ -145,6 +165,7 @@ export class Redactor {
 
   clearRegisteredValues(): void {
     this.sensitiveValues.clear();
+    this.exactSensitiveValues.clear();
   }
 
   isSensitiveKey(key: string): boolean {
@@ -156,6 +177,7 @@ export class Redactor {
   }
 
   redactString(input: string): string {
+    if (this.exactSensitiveValues.has(input.toLocaleLowerCase("en-US"))) return this.replacement;
     let output = input;
     // Longest first prevents a shorter registered value from leaving a suffix.
     const knownValues = [...this.sensitiveValues].sort((a, b) => b.length - a.length);

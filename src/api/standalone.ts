@@ -5,11 +5,11 @@ import fastifyStatic from "@fastify/static";
 import { ApprovalAuthority } from "../approval/index.js";
 import { buildApiServer, credentialProfilesFromEnvironment } from "./server.js";
 import { StaticConsoleIdentityProvider } from "./identity.js";
-import { meridianArtifacts } from "../capabilities/index.js";
-import { CapabilityCatalog } from "../catalog/index.js";
+import { loadConfiguredCapabilityCatalog } from "../catalog/index.js";
 import { createChatRouter } from "../chat/index.js";
 import type { RunValueV2 } from "../domain/index.js";
 import { createMeridianRunnerFactory } from "../execution/index.js";
+import { createMeridianTargetProfile, targetProfileDigest } from "../profiles/index.js";
 import { FileIdempotencyLedger, RunManager } from "../runs/index.js";
 import { SessionManager, type SessionPrincipal } from "../sessions/index.js";
 import type { PlaywrightSurface } from "../surface/playwright/playwrightSurface.js";
@@ -44,13 +44,6 @@ function boundedEnvironmentInteger(
   return value;
 }
 
-function environmentFlag(name: string, raw: string | undefined, fallback = false): boolean {
-  if (raw === undefined) return fallback;
-  if (raw === "1") return true;
-  if (raw === "0") return false;
-  throw new Error(`${name} must be either 1 or 0`);
-}
-
 function chatEffort(raw: string | undefined): "low" | "medium" | "high" | "xhigh" | "max" {
   const value = raw ?? "low";
   if (value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
@@ -59,7 +52,7 @@ function chatEffort(raw: string | undefined): "low" | "medium" | "high" | "xhigh
   throw new Error("ANTHROPIC_CHAT_EFFORT must be one of low, medium, high, xhigh, max");
 }
 
-const catalog = CapabilityCatalog.fromArtifacts(meridianArtifacts);
+const catalog = await loadConfiguredCapabilityCatalog();
 const sessions = new SessionManager<PlaywrightSurface>({
   idleTtlMs: boundedEnvironmentInteger(
     "SESSION_IDLE_TTL_MS",
@@ -83,17 +76,28 @@ const pendingSignOns = new Map<
   { principal: SessionPrincipal; inputs: Readonly<Record<string, RunValueV2>> }
 >();
 const identity = StaticConsoleIdentityProvider.fromEnvironment();
+const credentials = credentialProfilesFromEnvironment();
+const targetProfile = createMeridianTargetProfile({
+  ...(process.env.MERIDIAN_ORIGIN ? { origin: process.env.MERIDIAN_ORIGIN } : {}),
+  id: process.env.MERIDIAN_TARGET_PROFILE_ID?.trim() || "meridian.default",
+});
+const configuredTargetProfileDigest = targetProfileDigest(targetProfile);
 const runnerFactory = createMeridianRunnerFactory({
   catalog,
   sessions,
   approvalAuthority: authority,
   evidenceRoot,
-  ...(process.env.MERIDIAN_ORIGIN ? { origin: process.env.MERIDIAN_ORIGIN } : {}),
+  targetProfile,
   headless: process.env.MERIDIAN_HEADFUL !== "1",
   resolveSignOn: (sessionRef) => {
     const pending = pendingSignOns.get(sessionRef);
     pendingSignOns.delete(sessionRef);
     return pending;
+  },
+  resolveHandoffCredentials: (principal) => {
+    const profile = credentials[principal.role];
+    if (!profile || (principal.operatorId && profile.operator !== principal.operatorId)) return undefined;
+    return { operator: profile.operator, password: profile.password, branch: principal.branch };
   },
 });
 const runs = new RunManager({
@@ -112,7 +116,6 @@ const runs = new RunManager({
   ),
 });
 const chat = createChatRouter({
-  offline: environmentFlag("CHAT_OFFLINE", process.env.CHAT_OFFLINE),
   ...(process.env.ANTHROPIC_CHAT_MODEL ? { model: process.env.ANTHROPIC_CHAT_MODEL } : {}),
   timeoutMs: boundedEnvironmentInteger(
     "ANTHROPIC_CHAT_TIMEOUT_MS",
@@ -129,8 +132,9 @@ const app = buildApiServer({
   sessions,
   chat,
   identity,
-  credentials: credentialProfilesFromEnvironment(),
+  credentials,
   evidenceRoot,
+  targetProfileDigest: configuredTargetProfileDigest,
   registerPendingPrincipal: (sessionRef, principal, inputs) => {
     pendingSignOns.set(sessionRef, { principal, inputs });
   },

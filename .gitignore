@@ -12,4 +12,7 @@ evidence/generated/
 # Pre-hardening manual rehearsal captures are quarantined because their
 # manifests cover target footer identifiers produced before the new masks.
 evidence/ceo-rehearsal/
+# Local pre-final rehearsal bundles are retained for the workspace owner but
+# are not submission evidence. The verified deliverable lives in evidence/v2.
+evidence/final-demo/
 .meridian/

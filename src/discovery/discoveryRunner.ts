@@ -9,7 +9,7 @@ import { OperatorServer } from "../handoff/operatorServer.js";
 import type { Planner, PlannerAction, PlannerHistoryEntry } from "../model/planner.js";
 import type { PolicyEngine } from "../safety/policy.js";
 import type { Redactor } from "../safety/redactor.js";
-import type { DiscoverySurface, ObservedControl, SurfaceObservation } from "../surface/types.js";
+import type { DiscoverySurface, ObservedTarget, SurfaceObservation } from "../surface/types.js";
 
 export interface DiscoveryJournalEntry {
   step: number;
@@ -20,7 +20,7 @@ export interface DiscoveryJournalEntry {
   plannerLatencyMs: number;
   action: PlannerAction;
   risk: "safe" | "reversible" | "irreversible";
-  target: ObservedControl | null;
+  target: ObservedTarget | null;
   beforeStateHash: string;
   afterStateHash: string;
   beforeHeadings: string[];
@@ -78,16 +78,45 @@ export interface DiscoveryRunnerOptions {
   onOperatorAvailable?: (operatorUrl: string) => void;
 }
 
-function safeControl(control: ObservedControl | null): Record<string, unknown> | null {
-  if (!control) return null;
+function safeTarget(target: ObservedTarget | null): Record<string, unknown> | null {
+  if (!target) return null;
+  if ("kind" in target) {
+    return {
+      ref: target.ref,
+      framePath: target.framePath,
+      kind: target.kind,
+      name: target.name,
+      ...(target.kind === "label_value"
+        ? { label: target.label, valueCellOffset: target.valueCellOffset }
+        : {}),
+      ...(target.kind === "table" || target.kind === "table_row_value" || target.kind === "table_row_control"
+        ? { headers: target.headers }
+        : {}),
+      ...(target.kind === "table_row_value"
+        ? {
+            keyColumn: target.keyColumn,
+            keyInputName: target.keyInputName,
+            valueColumn: target.valueColumn,
+          }
+        : {}),
+      ...(target.kind === "table_row_control"
+        ? {
+            keyColumn: target.keyColumn,
+            keyInputName: target.keyInputName,
+            controlRole: target.controlRole,
+            controlName: target.controlName,
+          }
+        : {}),
+    };
+  }
   return {
-    ref: control.ref,
-    framePath: control.framePath,
-    role: control.role,
-    name: control.name,
-    label: control.label,
-    nameAttribute: control.nameAttribute,
-    disabled: control.disabled,
+    ref: target.ref,
+    framePath: target.framePath,
+    role: target.role,
+    name: target.name,
+    label: target.label,
+    nameAttribute: target.nameAttribute,
+    disabled: target.disabled,
   };
 }
 
@@ -146,7 +175,7 @@ export class DiscoveryRunner {
           return await this.#failure(runId, "TIMEOUT", "Discovery exceeded its time budget.", journal, lastObservation);
         }
 
-        const observation = await this.#options.surface.observe();
+        const observation = await this.#options.surface.observe(this.#options.inputs);
         lastObservation = observation;
         await this.#options.recorder.recordObservation({
           mode: "discovery",
@@ -159,7 +188,8 @@ export class DiscoveryRunner {
             url: frame.url,
             headings: frame.headings,
           })),
-          controls: observation.controls.map(safeControl),
+          controls: observation.controls.map((control) => safeTarget(control)),
+          semanticTargets: (observation.semanticTargets ?? []).map((target) => safeTarget(target)),
           screenshotPath: path.basename(observation.screenshotPath),
         }, { actor: "runtime" });
 
@@ -262,7 +292,9 @@ export class DiscoveryRunner {
 
         const action = decision.action!;
         const target = action.targetRef
-          ? observation.controls.find((control) => control.ref === action.targetRef) ?? null
+          ? observation.controls.find((control) => control.ref === action.targetRef) ??
+            observation.semanticTargets?.find((candidate) => candidate.ref === action.targetRef) ??
+            null
           : null;
         const policyDecision = this.#options.policy.evaluateAction({
           action: action.kind,
@@ -305,7 +337,7 @@ export class DiscoveryRunner {
           outputs[action.outputName] = receipt.observedValue;
           this.#options.redactor.register(receipt.observedValue);
         }
-        const after = await this.#options.surface.observe();
+        const after = await this.#options.surface.observe(this.#options.inputs);
         if (after.stateHash === observation.stateHash && action.kind !== "extract") {
           unchangedDecisions += 1;
         } else {
@@ -347,7 +379,7 @@ export class DiscoveryRunner {
           step,
           reason: decision.reason,
           action: action.kind,
-          target: safeControl(target),
+          target: safeTarget(target),
           valueSource: action.value?.kind ?? null,
           inputName: action.value?.kind === "input" ? action.value.name : null,
           outputName: action.outputName,
@@ -419,7 +451,7 @@ export class DiscoveryRunner {
     const remaining = Math.max(1, Math.min(60_000, this.#options.timeoutMs));
     try {
       await this.#control.waitForAutomation(remaining);
-      const reconciled = await this.#options.surface.observe();
+      const reconciled = await this.#options.surface.observe(this.#options.inputs);
       await this.#options.recorder.record("handoff.reconciled", {
         mode: "discovery",
         step,

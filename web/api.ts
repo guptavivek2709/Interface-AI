@@ -1,20 +1,31 @@
-import { containsProtectedMaterial, isProtectedKey, redactForDisplay, textForDisplay } from "./security";
+import { containsProtectedMaterial, isProtectedKey, redactForDisplay, textForDisplay } from "./security.js";
+import { approvalAuthorizedFromServerRoles } from "./authorization.js";
 import type {
   ApprovalChallenge,
   Capability,
   CapabilityField,
   ChatMessage,
+  ChatSequenceBinding,
+  ChatSequencePlan,
+  ChatSequenceStep,
   ConsolePrincipal,
+  DiscoveryEvidenceReference,
+  DiscoveryRunRecord,
+  DiscoveryRunStatus,
+  DiscoveryRunTimelineEvent,
   FieldType,
+  HumanIntervention,
   JsonValue,
   LiveEvent,
   RiskLevel,
+  ReconciliationRecord,
   RunIncident,
   RunJournalEntry,
   RunPhase,
   RunRecord,
+  RunOrchestration,
   TerminalStatus,
-} from "./types";
+} from "./types.js";
 
 // Production stays same-origin so browser authentication cannot be redirected
 // to a caller-controlled API host. Vite's dev proxy owns VITE_API_ORIGIN.
@@ -56,17 +67,7 @@ function jsonValue(value: unknown): JsonValue {
   return String(value ?? "");
 }
 
-function normalizeType(rawType: unknown, field: UnknownObject = {}): FieldType {
-  if (typeof rawType === "string") {
-    const supported = ["string", "number", "boolean", "money"].includes(rawType);
-    const kind = supported ? rawType : "string";
-    return {
-      kind: kind as FieldType["kind"],
-      ...(!supported ? { format: "unsupported" } : {}),
-      ...(Array.isArray(field.enum) ? { enum: field.enum.map(jsonValue) } : {}),
-      ...(typeof field.pattern === "string" ? { pattern: field.pattern } : {}),
-    };
-  }
+function normalizeType(rawType: unknown): FieldType {
   const source = object(rawType);
   const rawKind = string(source.kind, "string");
   const supported = ["string", "number", "boolean", "money", "object", "array"].includes(rawKind);
@@ -105,7 +106,7 @@ function normalizeField(raw: unknown, output = false): CapabilityField | null {
   return {
     name,
     description: string(source.description, name.replace(/[._-]+/gu, " ")),
-    type: normalizeType(source.type, source),
+    type: normalizeType(source.type),
     required: output ? false : boolean(source.required),
     classification: ["public", "internal", "confidential", "restricted", "secret"].includes(
       string(source.classification),
@@ -115,13 +116,8 @@ function normalizeField(raw: unknown, output = false): CapabilityField | null {
   };
 }
 
-function validType(rawType: unknown, schemaVersion: string, output = false): boolean {
-  if (schemaVersion === "1.0") {
-    return typeof rawType === "string" && (output
-      ? ["string", "number", "boolean", "money"].includes(rawType)
-      : ["string", "number", "boolean"].includes(rawType));
-  }
-  if (schemaVersion !== "2.0" || typeof rawType === "string") return false;
+function validType(rawType: unknown): boolean {
+  if (typeof rawType === "string") return false;
   const source = object(rawType);
   const kind = string(source.kind);
   if (!["string", "number", "boolean", "money", "object", "array"].includes(kind)) return false;
@@ -158,9 +154,9 @@ function validType(rawType: unknown, schemaVersion: string, output = false): boo
     if (!Array.isArray(source.required) || source.required.some((item) => typeof item !== "string")) return false;
     const properties = object(source.properties);
     const required = source.required as string[];
-    return Object.keys(properties).every(validId) && required.every(validId) && new Set(required).size === required.length && required.every((item) => Object.hasOwn(properties, item)) && Object.values(properties).every((item) => validType(item, "2.0"));
+    return Object.keys(properties).every(validId) && required.every(validId) && new Set(required).size === required.length && required.every((item) => Object.hasOwn(properties, item)) && Object.values(properties).every((item) => validType(item));
   }
-  if (kind === "array") return only(["kind", "items", "maxItems"]) && source.items !== undefined && validType(source.items, "2.0") && integerIfPresent(source.maxItems) && !(typeof source.maxItems === "number" && (source.maxItems <= 0 || source.maxItems > 10_000));
+  if (kind === "array") return only(["kind", "items", "maxItems"]) && source.items !== undefined && validType(source.items) && integerIfPresent(source.maxItems) && !(typeof source.maxItems === "number" && (source.maxItems <= 0 || source.maxItems > 10_000));
   return true;
 }
 
@@ -168,36 +164,19 @@ function validId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(value) && !["__proto__", "constructor", "prototype"].includes(value);
 }
 
-function validField(raw: unknown, output: boolean, schemaVersion: string): boolean {
+function validField(raw: unknown, output: boolean): boolean {
   const source = object(raw);
-  const legacy = schemaVersion === "1.0";
-  const allowed = output || !legacy
-    ? ["name", "description", "type", "classification", ...(!output && !legacy ? ["required"] : [])]
-    : ["name", "description", "type", "required", "classification", "pattern", "enum"];
-  const classifications = legacy
-    ? ["public", "internal", "confidential", "restricted"]
-    : ["public", "internal", "confidential", "restricted", "secret"];
-  const validPattern = source.pattern === undefined || (
-    typeof source.pattern === "string" && source.pattern.length > 0 && (() => {
-      try { new RegExp(source.pattern as string, "u"); return true; } catch { return false; }
-    })()
-  );
-  const validEnum = source.enum === undefined || (
-    Array.isArray(source.enum) && source.enum.length > 0 && source.enum.every((item) =>
-      item === null || typeof item === "string" || typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item)),
-    )
-  );
+  const allowed = ["name", "description", "type", "classification", ...(!output ? ["required"] : [])];
+  const classifications = ["public", "internal", "confidential", "restricted", "secret"];
   return (
     Object.keys(source).every((key) => allowed.includes(key)) &&
     typeof source.name === "string" &&
     validId(source.name) &&
     typeof source.description === "string" &&
     source.description.trim().length > 0 &&
-    validType(source.type, schemaVersion, output) &&
+    validType(source.type) &&
     (output || typeof source.required === "boolean") &&
-    classifications.includes(string(source.classification)) &&
-    validPattern &&
-    validEnum
+    classifications.includes(string(source.classification))
   );
 }
 
@@ -221,10 +200,33 @@ export function normalizeCapability(raw: unknown): Capability | null {
   const rawRisk = metadata.risk ?? artifactCapability.risk;
   const risk = normalizeRisk(rawRisk);
   const digest = string(metadata.digest);
+  const targetProfileDigest = string(metadata.targetProfileDigest);
+  const supportsSupervisorHandoff = metadata.supportsSupervisorHandoff === true;
   const inputSource = metadata.inputs ?? artifact.inputs;
   const outputSource = metadata.outputs ?? artifact.outputs;
   const rawInputs = array(inputSource);
   const rawOutputs = array(outputSource);
+  const lineageSource = object(metadata.lineage);
+  const lineageId = string(lineageSource.lineageId);
+  const discoveryRunId = string(lineageSource.discoveryRunId);
+  const lineageProvider = string(lineageSource.provider);
+  const lineageModel = string(lineageSource.model);
+  const traceDigest = string(lineageSource.traceDigest);
+  const draftDigest = string(lineageSource.draftDigest);
+  const reviewedDigest = string(lineageSource.reviewedDigest);
+  const approvedDigest = string(lineageSource.approvedDigest);
+  const canaryRunId = string(lineageSource.canaryRunId);
+  const safeLineageId = /^[A-Za-z0-9._-]{1,300}$/u.test(lineageId);
+  const safeDiscoveryRunId = /^[A-Za-z0-9._-]{1,300}$/u.test(discoveryRunId);
+  const safeCanaryRunId = /^[A-Za-z0-9._-]{1,300}$/u.test(canaryRunId);
+  const completeLineage =
+    safeLineageId &&
+    safeDiscoveryRunId &&
+    safeCanaryRunId &&
+    lineageProvider === "anthropic-messages" &&
+    /^[A-Za-z0-9._:-]{1,200}$/u.test(lineageModel) &&
+    [traceDigest, draftDigest, reviewedDigest, approvedDigest].every((value) => /^[a-f0-9]{64}$/u.test(value)) &&
+    approvedDigest === digest;
   const inputs = rawInputs
     .map((item) => normalizeField(item))
     .filter((item): item is CapabilityField => item !== null);
@@ -243,22 +245,41 @@ export function normalizeCapability(raw: unknown): Capability | null {
     inputs,
     outputs,
     digest,
+    targetProfileDigest,
+    ...(completeLineage
+      ? {
+          lineage: {
+            lineageId,
+            discoveryRunId,
+            provider: "anthropic-messages" as const,
+            model: lineageModel,
+            traceDigest,
+            draftDigest,
+            reviewedDigest,
+            approvedDigest,
+            canaryRunId,
+          },
+        }
+      : {}),
     contractValid:
       validId(id) &&
       name.trim().length > 0 &&
       /^\d+\.\d+\.\d+$/u.test(version) &&
-      ["1.0", "2.0"].includes(schemaVersion) &&
+      schemaVersion === "2.0" &&
       ["draft", "approved", "retired"].includes(approval) &&
       ["read", "write", "irreversible", "supervisor_only"].includes(string(rawRisk)) &&
       /^[a-f0-9]{64}$/u.test(digest) &&
+      /^[a-f0-9]{64}$/u.test(targetProfileDigest) &&
+      completeLineage &&
       Array.isArray(inputSource) &&
       Array.isArray(outputSource) &&
-      rawInputs.every((item) => validField(item, false, schemaVersion)) &&
-      rawOutputs.every((item) => validField(item, true, schemaVersion)) &&
+      rawInputs.every((item) => validField(item, false)) &&
+      rawOutputs.every((item) => validField(item, true)) &&
       new Set(inputs.map((field) => field.name)).size === inputs.length &&
       new Set(outputs.map((field) => field.name)).size === outputs.length &&
       inputs.length === rawInputs.length &&
       outputs.length === rawOutputs.length,
+    supportsSupervisorHandoff,
   };
 }
 
@@ -311,7 +332,7 @@ function normalizeIncidents(raw: unknown): RunIncident[] {
     const category = string(incident.category, "failure");
     return {
       code: string(incident.code, "RUNTIME_INCIDENT"),
-      category: ["recoverable", "failure", "escalation"].includes(category)
+      category: ["recoverable", "failure", "escalation", "intervention"].includes(category)
         ? (category as RunIncident["category"])
         : "failure",
       message: textForDisplay(string(incident.message, "The run reported an incident.")),
@@ -328,6 +349,9 @@ function normalizeChallenge(raw: unknown): ApprovalChallenge | undefined {
   const challenge = object(raw);
   const challengeId = string(challenge.challengeId);
   const rawSummary = array(challenge.summary);
+  const authorizedRoles = array(challenge.authorizedRoles).filter(
+    (role): role is "teller" | "supervisor" => role === "teller" || role === "supervisor",
+  );
   const summaryIds = rawSummary.map((item) => string(object(item).targetId));
   if (
     !challengeId ||
@@ -374,6 +398,83 @@ function normalizeChallenge(raw: unknown): ApprovalChallenge | undefined {
         reviewable: projectionComplete,
       };
     }),
+    authorized: approvalAuthorizedFromServerRoles(
+      challenge.requirement as ApprovalChallenge["requirement"],
+      authorizedRoles,
+    ),
+  };
+}
+
+function normalizeIntervention(raw: unknown, expectedRunId: string): HumanIntervention | undefined {
+  const intervention = object(raw);
+  const interventionId = string(intervention.interventionId);
+  const runId = string(intervention.runId);
+  const stepId = string(intervention.stepId);
+  const reasonCode = string(intervention.reasonCode);
+  const action = string(intervention.action);
+  const state = string(intervention.state);
+  const createdAt = string(intervention.createdAt);
+  const expiresAt = string(intervention.expiresAt);
+  const requiredRole = string(intervention.requiredRole);
+  const createdAtMs = Date.parse(createdAt);
+  const expiresAtMs = Date.parse(expiresAt);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(interventionId) ||
+    runId !== expectedRunId ||
+    !validId(stepId) ||
+    !validId(reasonCode) ||
+    !["restore_session", "authenticate_supervisor"].includes(action) ||
+    !["awaiting_human", "human_active", "action_completed", "revalidating"].includes(state) ||
+    !Number.isFinite(createdAtMs) ||
+    !Number.isFinite(expiresAtMs) ||
+    expiresAtMs <= createdAtMs ||
+    intervention.sameLiveSession !== true ||
+    (action === "authenticate_supervisor" && !validId(requiredRole))
+  ) return undefined;
+  return {
+    interventionId,
+    runId,
+    stepId,
+    reasonCode,
+    action: action as HumanIntervention["action"],
+    state: state as HumanIntervention["state"],
+    createdAt,
+    expiresAt,
+    sameLiveSession: true,
+    ...(requiredRole ? { requiredRole } : {}),
+  };
+}
+
+function normalizeOrchestration(raw: unknown): RunOrchestration | undefined {
+  const orchestration = object(raw);
+  if (orchestration.kind === "reconciliation") {
+    const sourceRunId = string(orchestration.sourceRunId);
+    return sourceRunId ? { kind: "reconciliation", sourceRunId } : undefined;
+  }
+  const sequenceId = string(orchestration.sequenceId);
+  const stepId = string(orchestration.stepId);
+  const stepIndex = number(orchestration.stepIndex, -1);
+  const stepCount = number(orchestration.stepCount, -1);
+  const parentRunId = string(orchestration.parentRunId);
+  if (
+    orchestration.kind !== "chat_sequence" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(sequenceId) ||
+    !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(stepId) ||
+    !Number.isSafeInteger(stepIndex) ||
+    !Number.isSafeInteger(stepCount) ||
+    stepIndex < 0 ||
+    stepCount < 1 ||
+    stepCount > 3 ||
+    stepIndex >= stepCount ||
+    (orchestration.parentRunId !== undefined && !parentRunId)
+  ) return undefined;
+  return {
+    kind: "chat_sequence",
+    sequenceId,
+    stepId,
+    stepIndex,
+    stepCount,
+    ...(parentRunId ? { parentRunId } : {}),
   };
 }
 
@@ -432,6 +533,12 @@ export function normalizeRun(raw: unknown): RunRecord | null {
     : undefined;
   const invalidChallenge =
     approvalIsCurrent && Object.keys(object(rawChallenge)).length > 0 && !challenge;
+  const rawIntervention = source.intervention ?? progress.intervention;
+  const interventionIsCurrent = runPhase === "awaiting_human" && terminalStatus === undefined;
+  const normalizedIntervention = normalizeIntervention(rawIntervention, id);
+  const intervention = interventionIsCurrent ? normalizedIntervention : undefined;
+  const invalidIntervention = interventionIsCurrent && !intervention;
+  const orchestration = normalizeOrchestration(source.orchestration);
   const outputContainer = Object.hasOwn(result, "outputs") ? result : source;
   const normalizedOutputs = record(outputContainer.outputs);
   return {
@@ -440,6 +547,9 @@ export function normalizeRun(raw: unknown): RunRecord | null {
     capabilityVersion: string(source.capabilityVersion, string(result.capabilityVersion)),
     ...(typeof source.artifactDigest === "string" || typeof result.artifactDigest === "string"
       ? { artifactDigest: string(source.artifactDigest, string(result.artifactDigest)) }
+      : {}),
+    ...(typeof source.targetProfileDigest === "string" || typeof result.targetProfileDigest === "string"
+      ? { targetProfileDigest: string(source.targetProfileDigest, string(result.targetProfileDigest)) }
       : {}),
     ...(typeof source.revision === "number" && Number.isSafeInteger(source.revision) && source.revision >= 0
       ? { revision: source.revision }
@@ -479,8 +589,13 @@ export function normalizeRun(raw: unknown): RunRecord | null {
       ...(invalidChallenge
         ? [{ code: "APPROVAL_PROJECTION_INVALID", category: "escalation" as const, message: "The approval challenge was incomplete or used an unsupported requirement.", occurredAt: new Date().toISOString() }]
         : []),
+      ...(invalidIntervention
+        ? [{ code: "INTERVENTION_PROJECTION_INVALID", category: "escalation" as const, message: "The human handoff projection was incomplete or did not match this run.", occurredAt: new Date().toISOString() }]
+        : []),
     ],
     ...(challenge ? { challenge } : {}),
+    ...(intervention ? { intervention } : {}),
+    ...(orchestration ? { orchestration } : {}),
   };
 }
 
@@ -501,13 +616,29 @@ function collection(raw: unknown, keys: string[]): unknown[] {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly details: Readonly<Record<string, JsonValue>> | undefined;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: Readonly<Record<string, JsonValue>>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
+}
+
+function sequenceSelectionDetails(raw: unknown): Readonly<Record<string, JsonValue>> | undefined {
+  const details = object(raw);
+  const count = number(details.count, -1);
+  const sourceStepId = string(details.sourceStepId);
+  const sourceCollectionPath = array(details.sourceCollectionPath);
+  if (
+    !Number.isSafeInteger(count) || count < 2 || count > 10_000 ||
+    !validId(sourceStepId) ||
+    sourceCollectionPath.length === 0 ||
+    sourceCollectionPath.some((segment) => typeof segment !== "string" || !validId(segment))
+  ) return undefined;
+  return { count, sourceStepId, sourceCollectionPath: sourceCollectionPath as string[] };
 }
 
 async function requestJson(path: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<unknown> {
@@ -549,10 +680,15 @@ async function requestJson(path: string, init: RequestInit = {}, timeoutMs = 15_
     }
     if (!response.ok) {
       const error = object(object(payload).error ?? payload);
+      const code = string(error.code, `HTTP_${response.status}`);
+      const details = code === "SEQUENCE_SELECTION_REQUIRED"
+        ? sequenceSelectionDetails(error.details)
+        : undefined;
       throw new ApiError(
         response.status,
-        string(error.code, `HTTP_${response.status}`),
+        code,
         textForDisplay(string(error.message, "The service could not complete that request.")),
+        details,
       );
     }
     return payload;
@@ -576,6 +712,146 @@ export async function getCapabilities(signal?: AbortSignal): Promise<Capability[
   return collection(payload, ["capabilities", "items", "data"])
     .map(normalizeCapability)
     .filter((item): item is Capability => item !== null);
+}
+
+function validDigest(value: string): boolean {
+  return /^[a-f0-9]{64}$/u.test(value);
+}
+
+function normalizeDiscoveryTimeline(raw: unknown): DiscoveryRunTimelineEvent[] {
+  const supported = new Set<DiscoveryRunTimelineEvent["type"]>([
+    "draft_created",
+    "reviewed",
+    "canary_passed",
+    "approved",
+  ]);
+  return array(raw).flatMap((item) => {
+    const source = object(item);
+    const type = string(source.type) as DiscoveryRunTimelineEvent["type"];
+    const at = string(source.at);
+    const actor = textForDisplay(string(source.actor));
+    const artifactDigest = string(source.artifactDigest);
+    if (!supported.has(type) || !Number.isFinite(Date.parse(at)) || !actor || !validDigest(artifactDigest)) return [];
+    const parentArtifactDigest = string(source.parentArtifactDigest);
+    const traceDigest = string(source.traceDigest);
+    const reviewDiffDigest = string(source.reviewDiffDigest);
+    const changedPathCount = number(source.changedPathCount, -1);
+    const canaryRunId = string(source.canaryRunId);
+    const evidenceDigest = string(source.evidenceDigest);
+    return [{
+      type,
+      at,
+      actor,
+      artifactDigest,
+      ...(validDigest(parentArtifactDigest) ? { parentArtifactDigest } : {}),
+      ...(validDigest(traceDigest) ? { traceDigest } : {}),
+      ...(validDigest(reviewDiffDigest) ? { reviewDiffDigest } : {}),
+      ...(Number.isSafeInteger(changedPathCount) && changedPathCount >= 0 ? { changedPathCount } : {}),
+      ...(validId(canaryRunId) ? { canaryRunId } : {}),
+      ...(validDigest(evidenceDigest) ? { evidenceDigest } : {}),
+    }];
+  });
+}
+
+function normalizeDiscoveryEvidence(raw: unknown): DiscoveryEvidenceReference[] {
+  return array(raw).flatMap((item) => {
+    const source = object(item);
+    const kind = string(source.kind);
+    const label = textForDisplay(string(source.label, string(source.referenceId)));
+    const sha256 = string(source.sha256, string(source.digest));
+    const href = string(source.href, string(source.url));
+    if (!["artifact", "lineage", "canary"].includes(kind) || !label || !validDigest(sha256)) return [];
+    const safeHref = /^\/api\/v1\/(?:capabilities\/[A-Za-z0-9._:-]{1,160}\/\d+\.\d+\.\d+|discovery-runs\/[A-Za-z0-9._:-]{1,300})$/u.test(href);
+    return [{
+      kind: kind as DiscoveryEvidenceReference["kind"],
+      label,
+      sha256,
+      ...(safeHref ? { href } : {}),
+    }];
+  });
+}
+
+export function normalizeDiscoveryRun(raw: unknown): DiscoveryRunRecord | null {
+  const envelope = object(raw);
+  const source = object(envelope.discoveryRun ?? envelope.run ?? raw);
+  if (source.kind !== undefined && source.kind !== "discovery") return null;
+  const id = string(source.discoveryRunId, string(source.id));
+  const discoveryRunId = string(source.discoveryRunId, id);
+  const capabilityId = string(source.capabilityId);
+  const capabilityVersion = string(source.capabilityVersion);
+  const createdAt = string(source.createdAt);
+  const timeline = normalizeDiscoveryTimeline(source.timeline ?? source.events);
+  const completedAt = string(source.completedAt, timeline.at(-1)?.at ?? "");
+  const status = string(source.status) as DiscoveryRunStatus;
+  const provider = string(source.provider);
+  const model = string(source.model);
+  const rawInputs = array(source.inputs ?? source.inputContract);
+  const inputs = rawInputs.flatMap((item) => {
+    const field = normalizeField(item);
+    return field ? [{ ...field, valueStatus: "withheld" as const }] : [];
+  });
+  const rawOutputContract = array(source.outputContract ?? source.outputs);
+  const outputContract = rawOutputContract.flatMap((item) => {
+    const field = normalizeField(item, true);
+    return field ? [field] : [];
+  });
+  const outputSource = object(source.output ?? source.result ?? source.structuredOutput);
+  const output = {
+    traceDigest: string(outputSource.traceDigest),
+    draftDigest: string(outputSource.draftDigest),
+    reviewedDigest: string(outputSource.reviewedDigest),
+    approvedDigest: string(outputSource.approvedDigest),
+    canaryRunId: string(outputSource.canaryRunId),
+  };
+  const evidence = normalizeDiscoveryEvidence(source.evidence);
+  if (
+    !validId(id) || id !== discoveryRunId || !validId(capabilityId) ||
+    !/^\d+\.\d+\.\d+$/u.test(capabilityVersion) ||
+    !Number.isFinite(Date.parse(createdAt)) || !Number.isFinite(Date.parse(completedAt)) ||
+    !["draft", "reviewed", "canary_passed", "approved"].includes(status) ||
+    provider !== "anthropic-messages" || !/^[A-Za-z0-9._:-]{1,200}$/u.test(model) ||
+    rawInputs.length !== inputs.length || rawOutputContract.length !== outputContract.length ||
+    ![output.traceDigest, output.draftDigest, output.reviewedDigest, output.approvedDigest].every(validDigest) ||
+    !validId(output.canaryRunId) || timeline.length === 0
+  ) return null;
+  return {
+    kind: "discovery",
+    id,
+    discoveryRunId,
+    capabilityId,
+    capabilityVersion,
+    capabilityName: textForDisplay(string(source.capabilityName, humanizeIdentifier(capabilityId))),
+    goal: textForDisplay(string(source.goal, "Privacy-safe discovery goal retained in the approved artifact.")),
+    createdAt,
+    completedAt,
+    status,
+    provider: "anthropic-messages",
+    model,
+    inputs,
+    outputContract,
+    output,
+    timeline,
+    evidence,
+  };
+}
+
+function humanizeIdentifier(value: string): string {
+  return value.replace(/[._:-]+/gu, " ").replace(/\b\w/gu, (letter) => letter.toLocaleUpperCase());
+}
+
+export async function getDiscoveryRuns(signal?: AbortSignal): Promise<DiscoveryRunRecord[]> {
+  const payload = await requestJson("/discovery-runs", signal ? { signal } : {});
+  return collection(payload, ["discoveryRuns", "runs", "items", "data"])
+    .map(normalizeDiscoveryRun)
+    .filter((item): item is DiscoveryRunRecord => item !== null);
+}
+
+export async function getDiscoveryRun(id: string, signal?: AbortSignal): Promise<DiscoveryRunRecord> {
+  const payload = await requestJson(`/discovery-runs/${encodeURIComponent(id)}`, signal ? { signal } : {});
+  const run = normalizeDiscoveryRun(payload);
+  if (!run) throw new ApiError(502, "INVALID_DISCOVERY_RUN_RESPONSE", "The service returned an invalid discovery record.");
+  if (run.id !== id) throw new ApiError(502, "DISCOVERY_RUN_BINDING_MISMATCH", "The service returned a different discovery record.");
+  return run;
 }
 
 export async function getRuns(signal?: AbortSignal): Promise<RunRecord[]> {
@@ -653,22 +929,32 @@ export function evidenceUrl(runId: string, evidencePath: string): string {
   return `${API_ROOT}/runs/${encodeURIComponent(runId)}/evidence/${encodedPath}`;
 }
 
-export async function createRun(
-  request: {
-    capability: Capability;
-    inputs: Record<string, JsonValue>;
-    idempotencyKey: string;
-  },
-): Promise<RunRecord> {
-  const { capability, inputs, idempotencyKey } = request;
+export type CreateRunRequest = {
+  capability: Capability;
+  inputs: Record<string, JsonValue>;
+} & (
+  | { idempotencyKey: string; sequence?: never }
+  | { idempotencyKey?: never; sequence: { sequenceId: string; stepId: string; selectionIndex?: number } }
+);
+
+export async function createRun(request: CreateRunRequest): Promise<RunRecord> {
+  const { capability, inputs, idempotencyKey, sequence } = request;
+  if (!/^[a-f0-9]{64}$/u.test(capability.targetProfileDigest)) {
+    throw new ApiError(0, "TARGET_PROFILE_BINDING_INVALID", "The reviewed target profile binding is unavailable. Refresh the catalog before starting a run.");
+  }
   const payload = await requestJson("/runs", {
     method: "POST",
-    headers: { "idempotency-key": idempotencyKey, "x-meridian-action": "operator" },
+    headers: {
+      "x-meridian-action": "operator",
+      ...(sequence ? {} : { "idempotency-key": idempotencyKey }),
+    },
     body: JSON.stringify({
       capabilityId: capability.id,
       capabilityVersion: capability.version,
       artifactDigest: capability.digest,
+      targetProfileDigest: capability.targetProfileDigest,
       inputs,
+      ...(sequence ? { sequence } : {}),
     }),
   });
   const run = normalizeRun(payload);
@@ -676,9 +962,17 @@ export async function createRun(
   if (
     run.capabilityId !== capability.id ||
     run.capabilityVersion !== capability.version ||
-    run.artifactDigest !== capability.digest
+    run.artifactDigest !== capability.digest ||
+    run.targetProfileDigest !== capability.targetProfileDigest
   ) {
     throw new ApiError(502, "RUN_BINDING_MISMATCH", "The service returned a run that did not match the reviewed capability binding.");
+  }
+  if (sequence && (
+    run.orchestration?.kind !== "chat_sequence" ||
+    run.orchestration.sequenceId !== sequence.sequenceId ||
+    run.orchestration.stepId !== sequence.stepId
+  )) {
+    throw new ApiError(502, "SEQUENCE_BINDING_MISMATCH", "The service returned a run that did not match the authorized sequence step.");
   }
   return run;
 }
@@ -712,10 +1006,289 @@ export async function cancelRun(id: string, signal?: AbortSignal): Promise<RunRe
   return run;
 }
 
+export interface HandoffInvitation {
+  token: string;
+  runId: string;
+  interventionId: string;
+  requiredRole: string;
+  expiresAt: string;
+  oneTime: true;
+}
+
+function handoffRun(payload: unknown, runId: string, interventionId: string): RunRecord {
+  const run = normalizeRun(payload);
+  if (!run || run.id !== runId) {
+    throw new ApiError(502, "RUN_BINDING_MISMATCH", "The handoff response did not match the requested run.");
+  }
+  if (run.phase === "awaiting_human" && run.intervention?.interventionId !== interventionId) {
+    throw new ApiError(502, "INTERVENTION_BINDING_MISMATCH", "The handoff response did not preserve the current intervention binding.");
+  }
+  return run;
+}
+
+async function mutateHandoff(
+  runId: string,
+  interventionId: string,
+  operation: "take" | "resume",
+): Promise<RunRecord> {
+  const payload = await requestJson(`/runs/${encodeURIComponent(runId)}/handoff/${operation}`, {
+    method: "POST",
+    headers: { "x-meridian-action": "operator" },
+    body: JSON.stringify({ interventionId }),
+  });
+  return handoffRun(payload, runId, interventionId);
+}
+
+export function takeHumanControl(runId: string, interventionId: string): Promise<RunRecord> {
+  return mutateHandoff(runId, interventionId, "take");
+}
+
+export async function performHandoffAction(
+  runId: string,
+  interventionId: string,
+  action: "restore_session" | "authenticate_supervisor",
+): Promise<RunRecord> {
+  const payload = await requestJson(`/runs/${encodeURIComponent(runId)}/handoff/action`, {
+    method: "POST",
+    headers: { "x-meridian-action": "operator" },
+    body: JSON.stringify({ interventionId, action }),
+  });
+  return handoffRun(payload, runId, interventionId);
+}
+
+export function resumeHumanControl(runId: string, interventionId: string): Promise<RunRecord> {
+  return mutateHandoff(runId, interventionId, "resume");
+}
+
+export async function createHandoffInvitation(
+  runId: string,
+  interventionId: string,
+): Promise<HandoffInvitation> {
+  const payload = await requestJson(`/runs/${encodeURIComponent(runId)}/handoff/invitations`, {
+    method: "POST",
+    headers: { "x-meridian-action": "operator" },
+    body: JSON.stringify({ interventionId }),
+  });
+  const invitation = object(object(payload).invitation);
+  const token = string(invitation.token);
+  const requiredRole = string(invitation.requiredRole);
+  const expiresAt = string(invitation.expiresAt);
+  if (
+    !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
+    invitation.runId !== runId ||
+    invitation.interventionId !== interventionId ||
+    !validId(requiredRole) ||
+    !Number.isFinite(Date.parse(expiresAt)) ||
+    invitation.oneTime !== true
+  ) {
+    throw new ApiError(502, "INVALID_HANDOFF_INVITATION", "The service returned an invalid handoff invitation.");
+  }
+  return { token, runId, interventionId, requiredRole, expiresAt, oneTime: true };
+}
+
+export async function redeemHandoffInvitation(token: string): Promise<RunRecord> {
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(token)) {
+    throw new ApiError(400, "HANDOFF_INVITATION_INVALID", "Enter the exact one-time handoff invitation.");
+  }
+  const payload = await requestJson("/handoff/invitations/redeem", {
+    method: "POST",
+    headers: { "x-meridian-action": "operator" },
+    body: JSON.stringify({ token }),
+  });
+  const delegation = object(object(payload).delegation);
+  const runId = string(delegation.runId);
+  const interventionId = string(delegation.interventionId);
+  const run = handoffRun(payload, runId, interventionId);
+  if (
+    !runId ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(interventionId) ||
+    !validId(string(delegation.requiredRole)) ||
+    !Number.isFinite(Date.parse(string(delegation.expiresAt)))
+  ) {
+    throw new ApiError(502, "INVALID_HANDOFF_DELEGATION", "The service returned an invalid handoff delegation.");
+  }
+  return run;
+}
+
+export interface ReconciliationResponse {
+  reconciliation: ReconciliationRecord;
+  run?: RunRecord;
+}
+
+function normalizeReconciliation(payload: unknown, expectedSourceRunId: string): ReconciliationResponse {
+  const envelope = object(payload);
+  const source = object(envelope.reconciliation);
+  const sourceRunId = string(source.sourceRunId);
+  const runId = string(source.runId);
+  const status = string(source.status);
+  if (
+    sourceRunId !== expectedSourceRunId ||
+    !["not_started", "running", "running_or_complete", "complete"].includes(status) ||
+    ((status === "running" || status === "running_or_complete") && !runId)
+  ) {
+    throw new ApiError(502, "INVALID_RECONCILIATION_RESPONSE", "The service returned an invalid reconciliation binding.");
+  }
+  const rawDecision = object(source.decision);
+  const classification = string(rawDecision.classification);
+  const checkedFields = array(rawDecision.checkedFields);
+  const decision = status === "complete" &&
+    ["applied", "not_applied", "still_unknown"].includes(classification) &&
+    typeof rawDecision.reason === "string" &&
+    rawDecision.reason.length > 0 &&
+    checkedFields.length <= 100 &&
+    checkedFields.every((field) => typeof field === "string" && validId(field))
+    ? {
+        classification: classification as NonNullable<ReconciliationRecord["decision"]>["classification"],
+        reason: textForDisplay(rawDecision.reason),
+        checkedFields: checkedFields as string[],
+      }
+    : undefined;
+  if (status === "complete" && !decision) {
+    throw new ApiError(502, "INVALID_RECONCILIATION_RESPONSE", "The service returned an incomplete reconciliation decision.");
+  }
+  const run = envelope.run === undefined ? undefined : normalizeRun(envelope.run);
+  if (
+    (envelope.run !== undefined && !run) ||
+    (run && (
+      !runId ||
+      run.id !== runId ||
+      run.orchestration?.kind !== "reconciliation" ||
+      run.orchestration.sourceRunId !== expectedSourceRunId
+    ))
+  ) {
+    throw new ApiError(502, "RECONCILIATION_BINDING_MISMATCH", "The service returned a read run outside the requested reconciliation lineage.");
+  }
+  return {
+    reconciliation: {
+      sourceRunId,
+      status: status as ReconciliationRecord["status"],
+      ...(runId ? { runId } : {}),
+      ...(decision ? { decision } : {}),
+    },
+    ...(run ? { run } : {}),
+  };
+}
+
+export async function startReconciliation(sourceRunId: string): Promise<ReconciliationResponse> {
+  const payload = await requestJson(`/runs/${encodeURIComponent(sourceRunId)}/reconciliation`, {
+    method: "POST",
+    headers: { "x-meridian-action": "operator" },
+    body: JSON.stringify({}),
+  });
+  const response = normalizeReconciliation(payload, sourceRunId);
+  if (!response.run || !["running", "running_or_complete"].includes(response.reconciliation.status)) {
+    throw new ApiError(502, "INVALID_RECONCILIATION_RESPONSE", "The service did not return the bound read-only reconciliation run.");
+  }
+  return response;
+}
+
+export async function getReconciliation(sourceRunId: string, signal?: AbortSignal): Promise<ReconciliationResponse> {
+  const payload = await requestJson(
+    `/runs/${encodeURIComponent(sourceRunId)}/reconciliation`,
+    signal ? { signal } : {},
+  );
+  return normalizeReconciliation(payload, sourceRunId);
+}
+
 export interface ChatResponse {
   text: string;
-  proposal?: { capabilityId: string; capabilityVersion: string; artifactDigest: string; arguments: Record<string, JsonValue> };
-  routing?: { provider: string; model?: string; fallbackFrom?: string };
+  proposal?: { capabilityId: string; capabilityVersion: string; artifactDigest: string; targetProfileDigest: string; arguments: Record<string, JsonValue> };
+  sequence?: ChatSequencePlan;
+  routing?: { provider: string; model?: string };
+}
+
+function sequencePath(raw: unknown, allowEmpty: boolean): string[] | undefined {
+  if (!Array.isArray(raw) || (!allowEmpty && raw.length === 0) || raw.length > 8) return undefined;
+  if (raw.some((segment) => typeof segment !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,99}$/u.test(segment))) return undefined;
+  return raw as string[];
+}
+
+function normalizeSequenceBinding(raw: unknown, priorStepIds: ReadonlySet<string>): ChatSequenceBinding | undefined {
+  const binding = object(raw);
+  const sourceStepId = string(binding.sourceStepId);
+  const sourceCollectionPath = sequencePath(binding.sourceCollectionPath, false);
+  const valuePath = sequencePath(binding.valuePath, true);
+  const targetInput = string(binding.targetInput);
+  if (
+    !priorStepIds.has(sourceStepId) ||
+    !sourceCollectionPath ||
+    !valuePath ||
+    !/^[A-Za-z][A-Za-z0-9_]{0,99}$/u.test(targetInput) ||
+    binding.selection !== "exactly_one" ||
+    binding.onZero !== "stop_no_match" ||
+    binding.onMany !== "pause_for_authenticated_selection"
+  ) return undefined;
+  return {
+    sourceStepId,
+    sourceCollectionPath,
+    valuePath,
+    targetInput,
+    selection: "exactly_one",
+    onZero: "stop_no_match",
+    onMany: "pause_for_authenticated_selection",
+  };
+}
+
+function normalizeChatSequence(raw: unknown): ChatSequencePlan | undefined {
+  const sequence = object(raw);
+  const sequenceId = string(sequence.sequenceId);
+  const expiresAt = string(sequence.expiresAt);
+  const rawSteps = array(sequence.steps);
+  if (
+    sequence.kind !== "sequence" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(sequenceId) ||
+    sequence.failurePolicy !== "stop_on_non_success" ||
+    rawSteps.length < 1 ||
+    rawSteps.length > 3 ||
+    !Number.isFinite(Date.parse(expiresAt)) ||
+    Date.parse(expiresAt) <= Date.now()
+  ) return undefined;
+  const steps: ChatSequenceStep[] = [];
+  const priorStepIds = new Set<string>();
+  for (const rawStep of rawSteps) {
+    const step = object(rawStep);
+    const stepId = string(step.stepId);
+    const toolName = string(step.toolName);
+    const capabilityId = string(step.capabilityId);
+    const capabilityVersion = string(step.capabilityVersion);
+    const artifactDigest = string(step.artifactDigest);
+    const targetProfileDigest = string(step.targetProfileDigest);
+    const literalArgumentsSource = step.literalArguments;
+    if (
+      !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(stepId) ||
+      priorStepIds.has(stepId) ||
+      !/^[A-Za-z0-9_-]{1,64}$/u.test(toolName) ||
+      !validId(capabilityId) ||
+      !/^\d+\.\d+\.\d+$/u.test(capabilityVersion) ||
+      !/^[a-f0-9]{64}$/u.test(artifactDigest) ||
+      !/^[a-f0-9]{64}$/u.test(targetProfileDigest) ||
+      literalArgumentsSource === null ||
+      typeof literalArgumentsSource !== "object" ||
+      Array.isArray(literalArgumentsSource) ||
+      !Array.isArray(step.bindings) ||
+      step.bindings.length > 16
+    ) return undefined;
+    const literalArguments = jsonValue(literalArgumentsSource) as Record<string, JsonValue>;
+    const bindings = step.bindings.map((binding) => normalizeSequenceBinding(binding, priorStepIds));
+    if (
+      bindings.some((binding) => !binding) ||
+      containsProtectedMaterial(literalArguments) ||
+      new Set(bindings.map((binding) => binding!.targetInput)).size !== bindings.length ||
+      bindings.some((binding) => Object.hasOwn(literalArguments, binding!.targetInput))
+    ) return undefined;
+    steps.push({
+      stepId,
+      toolName,
+      capabilityId,
+      capabilityVersion,
+      literalArguments,
+      bindings: bindings as ChatSequenceBinding[],
+      artifactDigest,
+      targetProfileDigest,
+    });
+    priorStepIds.add(stepId);
+  }
+  return { kind: "sequence", sequenceId, steps, failurePolicy: "stop_on_non_success", expiresAt };
 }
 
 export interface CreatedSession {
@@ -738,7 +1311,9 @@ export async function createSession(
     run.capabilityId !== "session.sign_on" ||
     run.capabilityVersion !== "2.0.0" ||
     !run.artifactDigest ||
-    !/^[a-f0-9]{64}$/u.test(run.artifactDigest)
+    !/^[a-f0-9]{64}$/u.test(run.artifactDigest) ||
+    !run.targetProfileDigest ||
+    !/^[a-f0-9]{64}$/u.test(run.targetProfileDigest)
   ) {
     throw new ApiError(502, "INVALID_SESSION_RESPONSE", "The service returned an invalid session response.");
   }
@@ -765,6 +1340,7 @@ export async function postChat(
   const kind = string(source.kind);
   const rawArguments = jsonValue(object(source.arguments)) as Record<string, JsonValue>;
   const artifactDigest = string(envelope.artifactDigest);
+  const targetProfileDigest = string(envelope.targetProfileDigest);
   const proposal =
     kind === "invoke" &&
     typeof source.capabilityId === "string" &&
@@ -772,38 +1348,41 @@ export async function postChat(
     typeof source.capabilityVersion === "string" &&
     /^\d+\.\d+\.\d+$/u.test(source.capabilityVersion) &&
     /^[a-f0-9]{64}$/u.test(artifactDigest) &&
+    /^[a-f0-9]{64}$/u.test(targetProfileDigest) &&
     !containsProtectedMaterial(rawArguments)
       ? {
           capabilityId: source.capabilityId,
           capabilityVersion: source.capabilityVersion,
           artifactDigest,
+          targetProfileDigest,
           arguments: rawArguments,
         }
       : undefined;
+  const sequence = kind === "sequence" ? normalizeChatSequence(source) : undefined;
   return {
     text: textForDisplay(
       string(
         source.text,
         string(
           source.assistantText,
-          kind === "invoke" && !proposal
+          (kind === "invoke" && !proposal) || (kind === "sequence" && !sequence)
             ? "I could not prepare that request because its binding was incomplete or protected."
             : proposal
-              ? "I prepared a capability request for review."
+              ? "I matched an approved capability and am starting its exact validated request."
+              : sequence
+                ? "I matched an approved capability sequence and am starting its exact validated steps."
               : "Request received.",
         ),
       ),
     ),
     ...(proposal ? { proposal } : {}),
+    ...(sequence ? { sequence } : {}),
     ...(typeof metadata.provider === "string" && metadata.provider.trim()
       ? {
           routing: {
             provider: textForDisplay(metadata.provider.slice(0, 80)),
             ...(typeof metadata.model === "string" && metadata.model.trim()
               ? { model: textForDisplay(metadata.model.slice(0, 120)) }
-              : {}),
-            ...(typeof metadata.fallbackFrom === "string" && metadata.fallbackFrom.trim()
-              ? { fallbackFrom: textForDisplay(metadata.fallbackFrom.slice(0, 80)) }
               : {}),
           },
         }

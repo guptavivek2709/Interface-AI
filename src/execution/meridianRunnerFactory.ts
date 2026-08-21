@@ -9,7 +9,12 @@ import {
 } from "../domain/index.js";
 import { EventRecorder } from "../evidence/event-recorder.js";
 import { EvidenceStore } from "../evidence/store.js";
-import { createMeridianSurfaceOptions } from "../profiles/index.js";
+import {
+  bindArtifactToTargetProfile,
+  createMeridianSurfaceOptions,
+  targetProfileDigest,
+  type TargetInstanceProfileV2,
+} from "../profiles/index.js";
 import { ReplayRunnerV2 } from "../replay/replayRunnerV2.js";
 import type {
   ManagedReplayRunnerV2,
@@ -95,7 +100,9 @@ interface ManagedMeridianRunnerOptions {
   lease?: SessionLease<PlaywrightSurface>;
   capabilityId: string;
   artifactDigest: string;
+  targetProfileDigest?: string;
   inputDigest: string;
+  principalRebound?: () => boolean;
 }
 
 class ManagedMeridianRunner implements ManagedReplayRunnerV2 {
@@ -120,6 +127,28 @@ class ManagedMeridianRunner implements ManagedReplayRunnerV2 {
     return this.#handle(await this.#options.runner.resume(approvalToken));
   }
 
+  async takeHumanControl(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    return this.#handle(await this.#options.runner.takeHumanControl(interventionId, actor));
+  }
+
+  async performHumanAction(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+    action: "restore_session" | "authenticate_supervisor",
+  ): Promise<ReplayProgressV2> {
+    return this.#handle(await this.#options.runner.performHumanAction(interventionId, actor, action));
+  }
+
+  async resumeHuman(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    return this.#handle(await this.#options.runner.resumeHuman(interventionId, actor));
+  }
+
   close(outcome?: ManagedRunnerCloseOutcome): Promise<void> {
     this.#closePromise ??= this.#finalize(outcome);
     return this.#closePromise;
@@ -139,12 +168,21 @@ class ManagedMeridianRunner implements ManagedReplayRunnerV2 {
         : terminal && terminal.status !== "success"
           ? terminal.code
           : undefined;
+    let runnerCloseFailed = false;
+    try {
+      await this.#options.runner.close();
+    } catch {
+      runnerCloseFailed = true;
+    }
     const evidenceOutcome = await finalizeEvidenceBundle(
       this.#options.recorder,
       this.#options.evidence,
       {
         capabilityId: this.#options.capabilityId,
         artifactDigest: this.#options.artifactDigest,
+        ...(this.#options.targetProfileDigest
+          ? { targetProfileDigest: this.#options.targetProfileDigest }
+          : {}),
         inputDigest: this.#options.inputDigest,
         status,
         ...(code ? { code } : {}),
@@ -152,7 +190,7 @@ class ManagedMeridianRunner implements ManagedReplayRunnerV2 {
         plannerCallsAllowed: false,
       },
     );
-    const finalizationFailed = !evidenceOutcome.complete;
+    const finalizationFailed = runnerCloseFailed || !evidenceOutcome.complete;
 
     try {
       if (this.#options.mode === "sign_on") {
@@ -162,6 +200,7 @@ class ManagedMeridianRunner implements ManagedReplayRunnerV2 {
       } else {
         const safeToReuse =
           !finalizationFailed &&
+          !this.#options.principalRebound?.() &&
           (terminal?.status === "success" || terminal?.status === "business_outcome");
         if (safeToReuse) await this.#options.lease?.release();
         else await this.#options.sessionManager.revoke(this.#options.sessionRef);
@@ -222,6 +261,9 @@ class ManagedInitializationFailureRunner implements ManagedReplayRunnerV2 {
         capabilityId: options.request.capabilityId,
         capabilityVersion: options.request.capabilityVersion,
         artifactDigest: options.request.artifactDigest,
+        ...(options.request.targetProfileDigest
+          ? { targetProfileDigest: options.request.targetProfileDigest }
+          : {}),
         inputDigest: options.request.inputDigest,
         sessionRef: options.request.sessionRef,
         startedAt: timestamp,
@@ -267,6 +309,9 @@ class ManagedInitializationFailureRunner implements ManagedReplayRunnerV2 {
       {
         capabilityId: this.#options.request.capabilityId,
         artifactDigest: this.#options.request.artifactDigest,
+        ...(this.#options.request.targetProfileDigest
+          ? { targetProfileDigest: this.#options.request.targetProfileDigest }
+          : {}),
         inputDigest: this.#options.request.inputDigest,
         status: "failure",
         code: this.#options.code,
@@ -284,6 +329,8 @@ export interface MeridianRunnerFactoryOptions {
   approvalAuthority: ApprovalAuthority;
   evidenceRoot: string;
   origin?: string;
+  /** Trusted, non-secret target instance selected at process startup. */
+  targetProfile?: TargetInstanceProfileV2;
   headless?: boolean;
   timeoutMs?: number;
   resolvePrincipal?: (
@@ -301,6 +348,16 @@ export interface MeridianRunnerFactoryOptions {
   ) => {
     principal: SessionPrincipal;
     inputs: Readonly<Record<string, RunValueV2>>;
+  } | undefined;
+  /** Resolves credentials only inside the trusted same-session restore action. */
+  resolveHandoffCredentials?: (principal: {
+    operatorId?: string;
+    role: "teller" | "supervisor";
+    branch: string;
+  }) => {
+    operator: string;
+    password: string;
+    branch: string;
   } | undefined;
 }
 
@@ -362,6 +419,46 @@ async function finalizeEvidenceBundle(
   }
 }
 
+export async function restoreSameMeridianSession(
+  surface: PlaywrightSurface,
+  credentials: { operator: string; password: string; branch: string },
+): Promise<void> {
+  try {
+    const current = new URL(surface.page.url());
+    const signOnUrl = new URL("/signon", current.origin).toString();
+    await surface.page.goto(signOnUrl, { waitUntil: "domcontentloaded" });
+    await surface.waitUntilReady();
+
+    const operator = surface.page.locator('[name="operator"]');
+    const password = surface.page.locator('[name="password"]');
+    const branch = surface.page.locator('[name="branch"]');
+    const submit = surface.page.getByRole("button", { name: "Sign On", exact: true });
+    const counts = await Promise.all([operator.count(), password.count(), branch.count(), submit.count()]);
+    if (counts.some((count) => count !== 1)) throw new Error("The fixed sign-on controls were not unique");
+
+    await operator.fill(credentials.operator);
+    await password.fill(credentials.password);
+    await branch.selectOption(credentials.branch);
+    await Promise.all([
+      surface.page.waitForURL((url) => url.origin === current.origin && url.pathname === "/menu" && !url.search && !url.hash),
+      submit.click(),
+    ]);
+    await surface.waitUntilReady();
+    const restored = new URL(surface.page.url());
+    if (
+      restored.origin !== current.origin ||
+      restored.pathname !== "/menu" ||
+      restored.search !== "" ||
+      restored.hash !== "" ||
+      (surface.lastMainDocumentStatus !== null && surface.lastMainDocumentStatus >= 400)
+    ) {
+      throw new Error("The restored session did not reach the menu");
+    }
+  } catch {
+    throw new Error("The server-selected session restoration action failed");
+  }
+}
+
 /** Creates live MERIDIAN runners while keeping sessions and evidence outside model control. */
 export function createMeridianRunnerFactory(options: MeridianRunnerFactoryOptions): ManagedRunnerFactory {
   return async (request, context) => createManagedRunner(options, request, context);
@@ -375,8 +472,22 @@ async function createManagedRunner(
   const entry = options.catalog.resolve(request.capabilityId, request.capabilityVersion);
   if (!entry) throw new Error("Capability is missing, retired, or not approved");
   if (entry.metadata.digest !== request.artifactDigest) throw new Error("Catalog artifact digest changed after submission");
-  if (entry.artifact.schemaVersion !== "2.0") throw new Error("The live API supports only V2 capabilities");
-  const artifact = CapabilityArtifactV2Schema.parse(structuredClone(entry.artifact));
+  const baseArtifact = CapabilityArtifactV2Schema.parse(structuredClone(entry.artifact));
+  let artifact = baseArtifact;
+  if (request.targetProfileDigest) {
+    if (!options.targetProfile) throw new Error("The requested target profile is not configured");
+    const configuredProfileDigest = targetProfileDigest(options.targetProfile);
+    if (request.targetProfileDigest !== configuredProfileDigest) {
+      throw new Error("Target profile digest changed after submission");
+    }
+    artifact = bindArtifactToTargetProfile(
+      baseArtifact,
+      request.artifactDigest,
+      options.targetProfile,
+    ).artifact;
+  } else if (options.targetProfile) {
+    throw new Error("Target-bound execution requires targetProfileDigest");
+  }
   // Consume pending credential material before any fallible evidence/recorder
   // initialization. Hydrated values remain local to this factory invocation
   // and are never used to derive the public request/evidence digest.
@@ -397,6 +508,7 @@ async function createManagedRunner(
       mode: "replay-v2",
       capabilityId: request.capabilityId,
       artifactDigest: request.artifactDigest,
+      ...(request.targetProfileDigest ? { targetProfileDigest: request.targetProfileDigest } : {}),
       inputDigest: request.inputDigest,
     },
     redactor,
@@ -408,6 +520,7 @@ async function createManagedRunner(
   let lease: SessionLease<PlaywrightSurface> | undefined;
   let registered = false;
   let recorderInitialized = false;
+  let principalRebound = false;
   try {
     await recorder.initialize();
     recorderInitialized = true;
@@ -429,7 +542,11 @@ async function createManagedRunner(
       }
       surface = new PlaywrightSurface(
         createMeridianSurfaceOptions(path.join(evidence.runDirectory, "observations"), {
-          ...(options.origin ? { origin: options.origin } : {}),
+          ...(options.targetProfile
+            ? { origin: options.targetProfile.origin }
+            : options.origin
+              ? { origin: options.origin }
+              : {}),
           ...(options.headless === undefined ? {} : { headless: options.headless }),
           ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         }),
@@ -441,13 +558,30 @@ async function createManagedRunner(
     } else {
       lease = await options.sessions.acquire(request.sessionRef, request.runId);
       surface = lease.resource;
+      principal = lease.principal;
       mode = "borrowed";
     }
 
     const runtime = new NonClosingRuntime(new PlaywrightReplayRuntimeV2(surface, artifact));
+    const currentPrincipal = (): SessionPrincipal | undefined => options.sessions.get(request.sessionRef)?.principal;
+    const credentialsFor = (wanted: SessionPrincipal) => {
+      const credentials = options.resolveHandoffCredentials?.(wanted);
+      if (
+        !credentials ||
+        credentials.operator !== wanted.operatorId ||
+        credentials.branch !== wanted.branch
+      ) {
+        throw new Error("No credentials are available for the required session principal");
+      }
+      redactor.register(credentials.operator);
+      redactor.register(credentials.password);
+      redactor.register(credentials.branch);
+      return credentials;
+    };
     const runner = new ReplayRunnerV2({
       artifact,
       artifactDigest: request.artifactDigest,
+      ...(request.targetProfileDigest ? { targetProfileDigest: request.targetProfileDigest } : {}),
       inputDigest: request.inputDigest,
       inputs: { ...replayInputs },
       runtime,
@@ -456,6 +590,36 @@ async function createManagedRunner(
       evidence,
       redactor,
       runId: request.runId,
+      ...(mode === "borrowed" && principal
+        ? {
+            restoreSession: async () => {
+              const wanted = currentPrincipal();
+              if (!wanted) throw new Error("The retained session principal is unavailable");
+              await restoreSameMeridianSession(surface!, credentialsFor(wanted));
+            },
+            authenticateSupervisor: async () => {
+              const expected = currentPrincipal();
+              if (!expected) throw new Error("The retained session principal is unavailable");
+              const supervisorCredentials = options.resolveHandoffCredentials?.({
+                role: "supervisor",
+                branch: expected.branch,
+              });
+              if (!supervisorCredentials || supervisorCredentials.branch !== expected.branch) {
+                throw new Error("No supervisor credentials are available for this session");
+              }
+              const replacement: SessionPrincipal = {
+                operatorId: supervisorCredentials.operator,
+                role: "supervisor",
+                branch: expected.branch,
+              };
+              const credentials = credentialsFor(replacement);
+              principalRebound = true;
+              await restoreSameMeridianSession(surface!, credentials);
+              options.sessions.rebindPrincipal(request.sessionRef, request.runId, expected, replacement);
+            },
+            currentPrincipalRole: () => currentPrincipal()?.role,
+          }
+        : {}),
       onPhase: context.reportPhase,
     });
     return new ManagedMeridianRunner({
@@ -469,7 +633,9 @@ async function createManagedRunner(
       ...(lease ? { lease } : {}),
       capabilityId: request.capabilityId,
       artifactDigest: request.artifactDigest,
+      ...(request.targetProfileDigest ? { targetProfileDigest: request.targetProfileDigest } : {}),
       inputDigest: request.inputDigest,
+      principalRebound: () => principalRebound,
     });
   } catch (error) {
     let targetCleanupFailed = false;

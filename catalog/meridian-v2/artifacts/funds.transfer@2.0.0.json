@@ -1,0 +1,1884 @@
+{
+  "schemaVersion": "2.0",
+  "capability": {
+    "id": "funds.transfer",
+    "name": "Transfer funds",
+    "description": "Transfer funds between member shares through review and an approval-bound final post.",
+    "version": "2.0.0",
+    "approval": "approved",
+    "risk": "irreversible",
+    "tags": [
+      "meridian",
+      "deterministic-replay",
+      "discovered-v2"
+    ]
+  },
+  "provenance": {
+    "source": "discovery",
+    "createdAt": "2026-08-21T06:10:04.016Z",
+    "goal": "Follow exactly this safe, non-persistent sequence, one UI action per turn: click Main Menu; click Member Inquiry / Selection; select search mode number as a literal; fill the member search field from {{member_number}}; click Search; click the exact Select control in the result row bound to {{member_number}}; extract the Balance cell from the share row keyed by {{from_share}} as source_balance_before with money output type; extract the Balance cell from the share row keyed by {{to_share}} as destination_balance_before with money output type; click Funds Transfer; select the source share from {{from_share}}; select the destination share from {{to_share}}; fill the transfer amount from {{amount}}; fill the memo from {{memo}}; click Continue. Then STOP and finish only when the CONFIRM FUNDS TRANSFER heading is visible on the review page before posting. Never click Post Transfer. Extract exactly source_balance_before and destination_balance_before, with no other outputs.",
+    "discoveryRunId": "discovery.3a4ddec6-1a5e-4935-b320-65b45a33b435",
+    "planner": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet-5"
+    }
+  },
+  "compatibility": {
+    "surfaceAdapter": "playwright-web-meridian-v2",
+    "vendorProduct": "Meridian Core",
+    "appVersion": "4.2.1",
+    "entryPoint": "https://meridian-core.vendor.invalid/signon"
+  },
+  "inputs": [
+    {
+      "name": "member_number",
+      "description": "Six-digit MERIDIAN member number",
+      "type": {
+        "kind": "string",
+        "format": "member_number",
+        "minLength": 6,
+        "maxLength": 6,
+        "pattern": "^[0-9]{6}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "from_share",
+      "description": "Stable source share ID",
+      "type": {
+        "kind": "string",
+        "format": "share_id",
+        "pattern": "^[0-9]{6}-[A-Z0-9-]{5,20}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "to_share",
+      "description": "Stable destination share ID",
+      "type": {
+        "kind": "string",
+        "format": "share_id",
+        "pattern": "^[0-9]{6}-[A-Z0-9-]{5,20}$"
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "amount",
+      "description": "Positive USD amount",
+      "type": {
+        "kind": "money",
+        "currency": "USD",
+        "minimumMinorUnits": 1
+      },
+      "required": true,
+      "classification": "restricted"
+    },
+    {
+      "name": "memo",
+      "description": "Transfer memo",
+      "type": {
+        "kind": "string",
+        "maxLength": 60
+      },
+      "required": true,
+      "classification": "confidential"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "source_balance_before",
+      "description": "Source share balance captured before transfer review",
+      "type": {
+        "kind": "money",
+        "currency": "USD"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "destination_balance_before",
+      "description": "Destination share balance captured before transfer review",
+      "type": {
+        "kind": "money",
+        "currency": "USD"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "confirmation",
+      "description": "MERIDIAN transfer confirmation reference",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    },
+    {
+      "name": "posted_at",
+      "description": "Timestamp reported by MERIDIAN for the posted transfer",
+      "type": {
+        "kind": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "classification": "internal"
+    },
+    {
+      "name": "amount",
+      "description": "Amount confirmed on the posted transfer receipt",
+      "type": {
+        "kind": "money",
+        "currency": "USD",
+        "minimumMinorUnits": 1
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "source_balance",
+      "description": "Source share balance reported after the transfer",
+      "type": {
+        "kind": "money",
+        "currency": "USD"
+      },
+      "classification": "restricted"
+    },
+    {
+      "name": "destination_balance",
+      "description": "Destination share balance reported after the transfer",
+      "type": {
+        "kind": "money",
+        "currency": "USD"
+      },
+      "classification": "restricted"
+    }
+  ],
+  "policy": {
+    "routes": [
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/signon$",
+        "methods": [
+          "GET",
+          "POST"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/menu$",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "by": {
+            "required": false,
+            "values": [
+              "number",
+              "name"
+            ]
+          },
+          "q": {
+            "required": false,
+            "pattern": "^[A-Za-z0-9 .,'-]{0,64}$"
+          },
+          "next": {
+            "required": false,
+            "values": [
+              "transfer",
+              "open-share",
+              "update",
+              "hold"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}$",
+        "methods": [
+          "GET"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/(?:transfer|open-share|hold)(?:/(?:review|post))?$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      },
+      {
+        "origin": "https://meridian-core.vendor.invalid",
+        "pathPattern": "^/members/[0-9]{6}/update$",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "query": {
+          "inject": {
+            "required": false,
+            "values": [
+              "validation",
+              "notfound",
+              "permission",
+              "timeout",
+              "maintenance",
+              "server"
+            ]
+          }
+        }
+      }
+    ],
+    "allowedActions": [
+      "click",
+      "fill",
+      "select",
+      "extract"
+    ],
+    "maxEffect": "irreversible_commit",
+    "inputRelations": [
+      {
+        "kind": "starts_with_input",
+        "value": "from_share",
+        "prefix": "member_number",
+        "separator": "-"
+      },
+      {
+        "kind": "starts_with_input",
+        "value": "to_share",
+        "prefix": "member_number",
+        "separator": "-"
+      },
+      {
+        "kind": "not_equal",
+        "left": "from_share",
+        "right": "to_share"
+      }
+    ]
+  },
+  "targets": [
+    {
+      "id": "main_menu",
+      "description": "Return to the authenticated main menu from the persistent navigation region",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "member_inquiry",
+      "description": "Open member inquiry from the main menu",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_by",
+      "description": "Member inquiry search mode",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "search_value",
+      "description": "Member inquiry search value",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "search",
+      "description": "Submit member inquiry",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "select_member",
+      "description": "Select the result row for the exact requested member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "member_number_value",
+      "description": "Selected member number",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member No.:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "shares_table",
+      "description": "Selected member shares and balances",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ]
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "transaction_token",
+      "description": "Current form anti-replay token",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "_token"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "maintenance_continue",
+      "description": "Leave the declared maintenance interstitial",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "open_transaction",
+      "description": "Open funds transfer",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Funds Transfer",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "source_balance_before",
+      "description": "Source share balance before posting",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "from_share"
+          },
+          "valueColumn": "Balance"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "destination_balance_before",
+      "description": "Destination share balance before posting",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "to_share"
+          },
+          "valueColumn": "Balance"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "from_share",
+      "description": "Source share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "from"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "to_share",
+      "description": "Destination share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "to"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "amount",
+      "description": "Transfer amount",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "amount"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "memo",
+      "description": "Transfer memo",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "memo"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "continue",
+      "description": "Review transfer",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "commit",
+      "description": "Final transfer commit",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Post Transfer",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "review_member",
+      "description": "Reviewed member",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Member:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_from",
+      "description": "Reviewed source share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "From:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_to",
+      "description": "Reviewed destination share",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "To:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_amount",
+      "description": "Reviewed transfer amount",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Amount:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "review_memo",
+      "description": "Reviewed memo",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Memo:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_confirmation",
+      "description": "Posted transfer confirmation reference",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Confirmation:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "receipt_posted",
+      "description": "Posted transfer timestamp",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Posted:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "receipt_amount",
+      "description": "Posted transfer amount",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value",
+          "label": "Amount:",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_source_balance",
+      "description": "Source share balance reported after posting",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value_expr",
+          "label": {
+            "kind": "input",
+            "name": "from_share"
+          },
+          "prefix": "",
+          "suffix": ":",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "receipt_destination_balance",
+      "description": "Destination share balance reported after posting",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "label_value_expr",
+          "label": {
+            "kind": "input",
+            "name": "to_share"
+          },
+          "prefix": "",
+          "suffix": ":",
+          "valueCellOffset": 1
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.main-menu.3d7b9eb009c7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Main Menu",
+          "exact": true
+        },
+        {
+          "kind": "navigation_link",
+          "name": "Main Menu",
+          "exact": true,
+          "companionText": "Member Inquiry"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.member-inquiry-selection.4c3bde628cc7",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Member Inquiry / Selection",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Member Inquiry / Selection",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.by.dd66fd31806d",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "combobox",
+          "name": "Member Number Last Name",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "by"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.q.0238afec13dd",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "q",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "q"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.search.ff721a99805c",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Search",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.select-member-no-member-number.fea711bd9f27",
+      "description": "Observed table row control target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_control",
+          "headers": [
+            "Member No.",
+            "Name",
+            "Shares"
+          ],
+          "keyColumn": "Member No.",
+          "key": {
+            "kind": "input",
+            "name": "member_number"
+          },
+          "controlRole": "link",
+          "controlName": "Select"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.balance-share-id-from-share.7d9994a599dc",
+      "description": "Observed table row value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "from_share"
+          },
+          "valueColumn": "Balance"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.balance-share-id-to-share.0d1240140d65",
+      "description": "Observed table row value target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "table_row_value",
+          "headers": [
+            "Share ID",
+            "Type",
+            "Balance",
+            "Status"
+          ],
+          "keyColumn": "Share ID",
+          "key": {
+            "kind": "input",
+            "name": "to_share"
+          },
+          "valueColumn": "Balance"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.funds-transfer.9eede4acf865",
+      "description": "Observed link target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "link",
+          "name": "Funds Transfer",
+          "exact": true
+        },
+        {
+          "kind": "text",
+          "text": "Funds Transfer",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    },
+    {
+      "id": "target.from.740a125f1fd6",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "from"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.to.717307f19f67",
+      "description": "Observed combobox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "name",
+          "name": "to"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.amount.63ed0bab9425",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "amount",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "amount"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.memo.9b57f1991a3b",
+      "description": "Observed textbox target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "textbox",
+          "name": "memo",
+          "exact": true
+        },
+        {
+          "kind": "name",
+          "name": "memo"
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": true
+    },
+    {
+      "id": "target.continue.ced01f371e05",
+      "description": "Observed button target used during discovery.",
+      "framePath": [],
+      "strategies": [
+        {
+          "kind": "role",
+          "role": "button",
+          "name": "Continue",
+          "exact": true
+        }
+      ],
+      "cardinality": "exactly_one",
+      "sensitive": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace.001.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.main-menu.3d7b9eb009c7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.main-menu.3d7b9eb009c7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.member-inquiry-selection.4c3bde628cc7",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.002.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.member-inquiry-selection.4c3bde628cc7"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.member-inquiry-selection.4c3bde628cc7",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER INQUIRY / SELECTION",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.003.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.by.dd66fd31806d",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.by.dd66fd31806d",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.by.dd66fd31806d",
+        "operator": "equals",
+        "value": {
+          "kind": "literal",
+          "value": "number"
+        },
+        "redactActual": false
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.004.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.q.0238afec13dd",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.q.0238afec13dd",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.q.0238afec13dd",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "member_number"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.005.click",
+      "title": "click Observed button target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.search.ff721a99805c"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.search.ff721a99805c",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.006.click",
+      "title": "click Observed table row control target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.select-member-no-member-number.fea711bd9f27"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.select-member-no-member-number.fea711bd9f27",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "MEMBER RECORD",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.007.extract",
+      "title": "extract Observed table row value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.balance-share-id-from-share.7d9994a599dc",
+        "outputName": "source_balance_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.balance-share-id-from-share.7d9994a599dc",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.balance-share-id-from-share.7d9994a599dc",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.008.extract",
+      "title": "extract Observed table row value target used during discovery.",
+      "action": {
+        "kind": "extract",
+        "targetId": "target.balance-share-id-to-share.0d1240140d65",
+        "outputName": "destination_balance_before",
+        "source": "text"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.balance-share-id-to-share.0d1240140d65",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "target.balance-share-id-to-share.0d1240140d65",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.009.click",
+      "title": "click Observed link target used during discovery.",
+      "action": {
+        "kind": "click",
+        "targetId": "target.funds-transfer.9eede4acf865"
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.funds-transfer.9eede4acf865",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "text_visible",
+        "text": "FUNDS TRANSFER",
+        "exact": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "trace.010.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.from.740a125f1fd6",
+        "value": {
+          "kind": "input",
+          "name": "from_share"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.from.740a125f1fd6",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.from.740a125f1fd6",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "from_share"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.011.select",
+      "title": "select Observed combobox target used during discovery.",
+      "action": {
+        "kind": "select",
+        "targetId": "target.to.717307f19f67",
+        "value": {
+          "kind": "input",
+          "name": "to_share"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.to.717307f19f67",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.to.717307f19f67",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "to_share"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.012.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.amount.63ed0bab9425",
+        "value": {
+          "kind": "input",
+          "name": "amount"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.amount.63ed0bab9425",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.amount.63ed0bab9425",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "amount"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "trace.013.fill",
+      "title": "fill Observed textbox target used during discovery.",
+      "action": {
+        "kind": "fill",
+        "targetId": "target.memo.9b57f1991a3b",
+        "value": {
+          "kind": "input",
+          "name": "memo"
+        }
+      },
+      "preconditions": [
+        {
+          "kind": "target_present",
+          "targetId": "target.memo.9b57f1991a3b",
+          "present": true
+        }
+      ],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "target.memo.9b57f1991a3b",
+        "operator": "equals",
+        "value": {
+          "kind": "input",
+          "name": "memo"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "draft"
+    },
+    {
+      "id": "review_transfer",
+      "title": "Continue to transfer review",
+      "action": {
+        "kind": "click",
+        "targetId": "continue"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/transfer/review$"
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "review"
+    },
+    {
+      "id": "commit_transfer",
+      "title": "Post reviewed transfer",
+      "action": {
+        "kind": "click",
+        "targetId": "commit"
+      },
+      "preconditions": [
+        {
+          "kind": "all",
+          "conditions": [
+            {
+              "kind": "target_present",
+              "targetId": "transaction_token",
+              "present": true
+            },
+            {
+              "kind": "target_value",
+              "targetId": "transaction_token",
+              "operator": "matches",
+              "value": {
+                "kind": "literal",
+                "value": "^[^\\r\\n]{1,256}(?![\\s\\S])"
+              },
+              "redactActual": true
+            }
+          ]
+        }
+      ],
+      "postcondition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "route",
+            "pattern": "^/members/[0-9]{6}/transfer/post$"
+          },
+          {
+            "kind": "http_status",
+            "status": 200
+          },
+          {
+            "kind": "page_title",
+            "title": "Transfer Posted - Meridian Core",
+            "exact": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_confirmation",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_posted",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_amount",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_source_balance",
+            "present": true
+          },
+          {
+            "kind": "target_present",
+            "targetId": "receipt_destination_balance",
+            "present": true
+          }
+        ]
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 100
+      },
+      "effect": "irreversible_commit",
+      "approval": {
+        "kind": "user_confirmation",
+        "summaryTargets": [
+          "review_member",
+          "review_from",
+          "review_to",
+          "review_amount",
+          "review_memo"
+        ],
+        "summarySources": {},
+        "stateNonceTarget": "transaction_token",
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "id": "extract_transfer_confirmation",
+      "title": "Read transfer confirmation",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_confirmation",
+        "outputName": "confirmation",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_transfer_posted_at",
+      "title": "Read transfer posting time",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_posted",
+        "outputName": "posted_at",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_posted",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_transfer_amount",
+      "title": "Read posted transfer amount",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_amount",
+        "outputName": "amount",
+        "source": "text"
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_value",
+        "targetId": "receipt_amount",
+        "operator": "contains",
+        "value": {
+          "kind": "input",
+          "name": "amount"
+        },
+        "redactActual": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_transfer_source_balance",
+      "title": "Read resulting source balance",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_source_balance",
+        "outputName": "source_balance",
+        "source": "text",
+        "transform": {
+          "kind": "strip_exact_suffix",
+          "suffix": "(new balance)"
+        }
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_source_balance",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    },
+    {
+      "id": "extract_transfer_destination_balance",
+      "title": "Read resulting destination balance",
+      "action": {
+        "kind": "extract",
+        "targetId": "receipt_destination_balance",
+        "outputName": "destination_balance",
+        "source": "text",
+        "transform": {
+          "kind": "strip_exact_suffix",
+          "suffix": "(new balance)"
+        }
+      },
+      "preconditions": [],
+      "postcondition": {
+        "kind": "target_present",
+        "targetId": "receipt_destination_balance",
+        "present": true
+      },
+      "timeoutMs": 8000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 100
+      },
+      "effect": "read"
+    }
+  ],
+  "runtimeStates": [
+    {
+      "code": "SESSION_EXPIRED",
+      "description": "The MERIDIAN session expired; sign on again before retrying from the beginning.",
+      "category": "intervention",
+      "priority": 1000,
+      "condition": {
+        "kind": "http_status",
+        "status": 440
+      },
+      "effectCertainty": "not_applied",
+      "handoff": {
+        "kind": "same_session",
+        "action": "restore_session",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000
+      }
+    },
+    {
+      "code": "SUPERVISOR_REQUIRED",
+      "description": "This operation requires a separately authenticated supervisor session.",
+      "category": "intervention",
+      "priority": 990,
+      "condition": {
+        "kind": "http_status",
+        "status": 403
+      },
+      "effectCertainty": "not_applied",
+      "requiredRole": "supervisor",
+      "handoff": {
+        "kind": "same_session",
+        "action": "authenticate_supervisor",
+        "resume": {
+          "kind": "restart_run"
+        },
+        "revalidate": [
+          {
+            "kind": "route",
+            "pattern": "^/menu$"
+          }
+        ],
+        "expiresInMs": 120000,
+        "trigger": {
+          "kind": "capability_role",
+          "role": "supervisor"
+        }
+      }
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "description": "The requested member record does not exist.",
+      "category": "business_outcome",
+      "priority": 980,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 404
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "APPLICATION_ERROR",
+      "description": "MERIDIAN returned an unexpected application error.",
+      "category": "failure",
+      "priority": 970,
+      "condition": {
+        "kind": "http_status",
+        "status": 500
+      }
+    },
+    {
+      "code": "MAINTENANCE",
+      "description": "MERIDIAN entered its declared maintenance interstitial; return to the menu and restart safely.",
+      "category": "recoverable",
+      "priority": 960,
+      "condition": {
+        "kind": "http_status",
+        "status": 503
+      },
+      "recovery": {
+        "kind": "restart_run",
+        "action": {
+          "kind": "click",
+          "targetId": "maintenance_continue"
+        },
+        "maxAttempts": 1,
+        "waitMs": 0
+      }
+    },
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "description": "The browser is no longer authenticated; establish a new secure session.",
+      "category": "escalation",
+      "priority": 950,
+      "condition": {
+        "kind": "text_visible",
+        "text": "OPERATOR SIGN ON",
+        "exact": true
+      }
+    },
+    {
+      "code": "INSUFFICIENT_FUNDS",
+      "description": "The source share has insufficient available balance.",
+      "category": "business_outcome",
+      "priority": 940,
+      "condition": {
+        "kind": "text_visible",
+        "text": "Insufficient available balance in the source share.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "SOURCE_SHARE_HELD",
+      "description": "The source share is on hold and cannot be debited.",
+      "category": "business_outcome",
+      "priority": 935,
+      "condition": {
+        "kind": "text_visible",
+        "text": "Source share is HOLD and cannot be debited.",
+        "exact": true
+      },
+      "effectCertainty": "not_applied"
+    },
+    {
+      "code": "MEMBER_NOT_FOUND",
+      "description": "No member records matched the requested search.",
+      "category": "business_outcome",
+      "priority": 900,
+      "condition": {
+        "kind": "text_visible",
+        "text": "No member records matched your search.",
+        "exact": true
+      }
+    },
+    {
+      "code": "VALIDATION_REJECTED",
+      "description": "MERIDIAN rejected one or more submitted field values.",
+      "category": "business_outcome",
+      "priority": 800,
+      "condition": {
+        "kind": "all",
+        "conditions": [
+          {
+            "kind": "http_status",
+            "status": 400
+          },
+          {
+            "kind": "route",
+            "pattern": "^/members(?:/[0-9]{6}(?:/(?:update|(?:transfer|open-share|hold)(?:/(?:review|post))?))?)?$"
+          }
+        ]
+      },
+      "effectCertainty": "not_applied"
+    }
+  ],
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      {
+        "kind": "route",
+        "pattern": "^/members/[0-9]{6}/transfer/post$"
+      },
+      {
+        "kind": "http_status",
+        "status": 200
+      },
+      {
+        "kind": "page_title",
+        "title": "Transfer Posted - Meridian Core",
+        "exact": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_confirmation",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_posted",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_amount",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_source_balance",
+        "present": true
+      },
+      {
+        "kind": "target_present",
+        "targetId": "receipt_destination_balance",
+        "present": true
+      }
+    ]
+  }
+}

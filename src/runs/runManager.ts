@@ -11,18 +11,39 @@ export type ManagedRunPhase =
   | "running"
   | "recovering"
   | "awaiting_approval"
+  | "awaiting_human"
   | "completed";
 
 export interface SubmitRunRequest {
   readonly capabilityId: string;
   readonly capabilityVersion: string;
   readonly artifactDigest: string;
+  /** Server-selected deployment profile. Production API submissions always bind it. */
+  readonly targetProfileDigest?: string;
   readonly sessionRef: string;
   readonly inputs: Readonly<Record<string, RunValueV2>>;
   /** Server-derived opaque audit binding used when raw inputs contain credentials. */
   readonly inputDigestOverride?: string;
   readonly idempotencyKey?: string;
+  /** Server-authored orchestration lineage. Never accepted from a model as authority. */
+  readonly orchestration?: RunOrchestrationLineage;
 }
+
+export interface ChatSequenceRunLineage {
+  readonly kind: "chat_sequence";
+  readonly sequenceId: string;
+  readonly stepId: string;
+  readonly stepIndex: number;
+  readonly stepCount: number;
+  readonly parentRunId?: string;
+}
+
+export interface ReconciliationRunLineage {
+  readonly kind: "reconciliation";
+  readonly sourceRunId: string;
+}
+
+export type RunOrchestrationLineage = ChatSequenceRunLineage | ReconciliationRunLineage;
 
 /**
  * Only authenticated human principals may cross the approval boundary. Chat or
@@ -34,10 +55,25 @@ export interface RunApprovalActor {
   readonly roles: readonly string[];
 }
 
+export type RunHandoffActor = RunApprovalActor;
+
 export interface ManagedReplayRunnerV2 {
   run(): Promise<ReplayProgressV2>;
   issueApproval(actor: { id: string; roles: readonly string[] }): string;
   resume(approvalToken: string): Promise<ReplayProgressV2>;
+  takeHumanControl?(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2>;
+  performHumanAction?(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+    action: "restore_session" | "authenticate_supervisor",
+  ): Promise<ReplayProgressV2>;
+  resumeHuman?(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2>;
   close(outcome?: ManagedRunnerCloseOutcome): Promise<void>;
 }
 
@@ -60,9 +96,11 @@ export interface ManagedRunnerFactoryRequest {
   readonly capabilityId: string;
   readonly capabilityVersion: string;
   readonly artifactDigest: string;
+  readonly targetProfileDigest?: string;
   readonly inputDigest: string;
   readonly sessionRef: string;
   readonly inputs: Readonly<Record<string, RunValueV2>>;
+  readonly orchestration?: RunOrchestrationLineage;
 }
 
 export interface ManagedRunnerFactoryContext {
@@ -90,6 +128,7 @@ export interface RunSnapshot {
   readonly capabilityId: string;
   readonly capabilityVersion: string;
   readonly artifactDigest: string;
+  readonly targetProfileDigest?: string;
   readonly inputDigest: string;
   /** Exact submitted contract field names; values are intentionally not retained. */
   readonly inputNames: readonly string[];
@@ -106,6 +145,7 @@ export interface RunSnapshot {
   readonly cancellation?: RunCancellation;
   readonly managerFailure?: RunManagerFailure;
   readonly evidenceFinalization?: EvidenceFinalization;
+  readonly orchestration?: RunOrchestrationLineage;
 }
 
 export interface RunManagerEvent {
@@ -141,6 +181,7 @@ export type RunManagerErrorCode =
   | "IDEMPOTENCY_RETAINED"
   | "IDEMPOTENCY_LEDGER_UNAVAILABLE"
   | "RUN_NOT_APPROVABLE"
+  | "RUN_NOT_HANDOFFABLE"
   | "ROLE_REQUIRED"
   | "MODEL_APPROVAL_FORBIDDEN"
   | "RUN_NOT_CANCELLABLE"
@@ -169,12 +210,14 @@ interface MutableRun {
   capabilityId: string;
   capabilityVersion: string;
   artifactDigest: string;
+  targetProfileDigest?: string;
   inputDigest: string;
   inputNames: readonly string[];
   sessionRef: string;
   inputs: Readonly<Record<string, RunValueV2>>;
   idempotencyKey?: string;
   idempotencyBinding?: string;
+  orchestration?: RunOrchestrationLineage;
   phase: ManagedRunPhase;
   submittedAtMs: number;
   updatedAtMs: number;
@@ -187,6 +230,10 @@ interface MutableRun {
   managerFailure?: RunManagerFailure;
   evidenceFinalization?: EvidenceFinalization;
   pendingApprovalActor?: RunApprovalActor | undefined;
+  handoffActor?: RunHandoffActor | undefined;
+  pendingHandoffResumeActor?: RunHandoffActor | undefined;
+  handoffActionCompleted: boolean;
+  handoffBusy: boolean;
   finalizingAs?: "result" | "manager_failure" | "cancellation";
   finalization?: Promise<void>;
   ownsSession: boolean;
@@ -276,8 +323,27 @@ export class RunManager {
     if (!/^[a-f0-9]{64}$/u.test(request.artifactDigest)) {
       throw new RunManagerError("INVALID_REQUEST", "artifactDigest must be a lowercase SHA-256 digest");
     }
+    if (request.targetProfileDigest !== undefined && !/^[a-f0-9]{64}$/u.test(request.targetProfileDigest)) {
+      throw new RunManagerError("INVALID_REQUEST", "targetProfileDigest must be a lowercase SHA-256 digest");
+    }
     if (request.idempotencyKey !== undefined && !request.idempotencyKey.trim()) {
       throw new RunManagerError("INVALID_REQUEST", "idempotencyKey cannot be empty");
+    }
+    if (request.orchestration?.kind === "chat_sequence") {
+      nonEmpty(request.orchestration.sequenceId, "orchestration.sequenceId");
+      nonEmpty(request.orchestration.stepId, "orchestration.stepId");
+      if (
+        !Number.isInteger(request.orchestration.stepIndex) ||
+        request.orchestration.stepIndex < 0 ||
+        !Number.isInteger(request.orchestration.stepCount) ||
+        request.orchestration.stepCount < 1 ||
+        request.orchestration.stepIndex >= request.orchestration.stepCount
+      ) throw new RunManagerError("INVALID_REQUEST", "Invalid chat-sequence run lineage");
+      if (request.orchestration.parentRunId !== undefined) {
+        nonEmpty(request.orchestration.parentRunId, "orchestration.parentRunId");
+      }
+    } else if (request.orchestration?.kind === "reconciliation") {
+      nonEmpty(request.orchestration.sourceRunId, "orchestration.sourceRunId");
     }
     const inputs = frozenClone(request.inputs) as Readonly<Record<string, RunValueV2>>;
     if (
@@ -295,8 +361,10 @@ export class RunManager {
           capabilityId: request.capabilityId,
           capabilityVersion: request.capabilityVersion,
           artifactDigest: request.artifactDigest,
+          ...(request.targetProfileDigest ? { targetProfileDigest: request.targetProfileDigest } : {}),
           inputDigest: bindingInputDigest,
           sessionRef: request.sessionRef,
+          ...(request.orchestration ? { orchestration: request.orchestration } : {}),
         });
     if (request.idempotencyKey !== undefined) {
       const existing = this.#idempotency.get(request.idempotencyKey);
@@ -345,18 +413,22 @@ export class RunManager {
       capabilityId: request.capabilityId,
       capabilityVersion: request.capabilityVersion,
       artifactDigest: request.artifactDigest,
+      ...(request.targetProfileDigest ? { targetProfileDigest: request.targetProfileDigest } : {}),
       inputDigest,
       inputNames,
       sessionRef: request.sessionRef,
       inputs,
       ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
       ...(idempotencyBinding === undefined ? {} : { idempotencyBinding }),
+      ...(request.orchestration ? { orchestration: frozenClone(request.orchestration) } : {}),
       phase: "queued",
       submittedAtMs: now,
       updatedAtMs: now,
       revision: 0,
       ownsSession: false,
       activeSlot: false,
+      handoffActionCompleted: false,
+      handoffBusy: false,
       events: [],
       subscribers: new Set(),
     };
@@ -366,6 +438,8 @@ export class RunManager {
       capabilityId: run.capabilityId,
       capabilityVersion: run.capabilityVersion,
       inputDigest,
+      ...(run.targetProfileDigest ? { targetProfileDigest: run.targetProfileDigest } : {}),
+      ...(run.orchestration ? { orchestration: run.orchestration } : {}),
     });
     this.#scheduleDrain();
     return event.snapshot;
@@ -459,6 +533,107 @@ export class RunManager {
     return event.snapshot;
   }
 
+  async takeHumanControl(
+    runId: string,
+    interventionId: string,
+    actor: RunHandoffActor,
+  ): Promise<RunSnapshot> {
+    this.#assertOpen();
+    const run = this.#requireHandoff(runId, interventionId, actor);
+    if (run.handoffActor) {
+      if (run.handoffActor.id === actor.id && run.handoffActor.source === actor.source) {
+        return this.#snapshot(run);
+      }
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "Another operator already controls this intervention");
+    }
+    if (run.handoffBusy) throw new RunManagerError("RUN_NOT_HANDOFFABLE", "An intervention operation is already in progress");
+    if (!run.runner?.takeHumanControl) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The intervention runner is unavailable");
+    }
+    run.handoffBusy = true;
+    try {
+      const progress = await run.runner.takeHumanControl(interventionId, { id: actor.id, roles: actor.roles });
+      if (progress.status !== "awaiting_human" || progress.intervention.state !== "human_active") {
+        throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The runner did not transfer human control");
+      }
+      run.handoffActor = frozenClone(actor) as RunHandoffActor;
+      run.progress = frozenClone(progress) as ReplayProgressV2;
+      return this.#emit(run, "intervention.taken", {
+        interventionId,
+        actorId: actor.id,
+        actorRoles: [...actor.roles],
+        source: actor.source,
+      }).snapshot;
+    } catch (error) {
+      if (error instanceof RunManagerError) throw error;
+      throw this.#handoffError(error);
+    } finally {
+      run.handoffBusy = false;
+    }
+  }
+
+  async performHumanAction(
+    runId: string,
+    interventionId: string,
+    actor: RunHandoffActor,
+    action: "restore_session" | "authenticate_supervisor",
+  ): Promise<RunSnapshot> {
+    this.#assertOpen();
+    const run = this.#requireHandoff(runId, interventionId, actor);
+    this.#assertHandoffOwner(run, actor);
+    if (run.handoffActionCompleted) return this.#snapshot(run);
+    if (run.handoffBusy) throw new RunManagerError("RUN_NOT_HANDOFFABLE", "An intervention operation is already in progress");
+    if (!run.runner?.performHumanAction) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The intervention runner is unavailable");
+    }
+    run.handoffBusy = true;
+    try {
+      const progress = await run.runner.performHumanAction(
+        interventionId,
+        { id: actor.id, roles: actor.roles },
+        action,
+      );
+      if (progress.status !== "awaiting_human" || progress.intervention.state !== "action_completed") {
+        throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The runner left the intervention boundary unexpectedly");
+      }
+      run.handoffActionCompleted = true;
+      run.progress = frozenClone(progress) as ReplayProgressV2;
+      return this.#emit(run, "intervention.action_completed", {
+        interventionId,
+        action,
+        actorId: actor.id,
+      }).snapshot;
+    } catch (error) {
+      if (error instanceof RunManagerError) throw error;
+      throw this.#handoffError(error);
+    } finally {
+      run.handoffBusy = false;
+    }
+  }
+
+  resumeHuman(runId: string, interventionId: string, actor: RunHandoffActor): RunSnapshot {
+    this.#assertOpen();
+    const run = this.#requireHandoff(runId, interventionId, actor);
+    this.#assertHandoffOwner(run, actor);
+    if (
+      !run.handoffActionCompleted ||
+      run.progress?.status !== "awaiting_human" ||
+      run.progress.intervention.state !== "action_completed"
+    ) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The required intervention action has not completed");
+    }
+    if (run.handoffBusy || run.pendingHandoffResumeActor) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The intervention is already resuming");
+    }
+    run.pendingHandoffResumeActor = frozenClone(actor) as RunHandoffActor;
+    const event = this.#emit(run, "intervention.resume_accepted", {
+      interventionId,
+      actorId: actor.id,
+    });
+    this.#scheduleDrain();
+    return event.snapshot;
+  }
+
   async cancel(runId: string, reason = "Cancelled by caller"): Promise<RunSnapshot> {
     this.#assertOpen();
     const run = this.#requireRun(runId);
@@ -473,10 +648,14 @@ export class RunManager {
       await run.finalization;
       return this.#snapshot(run);
     }
-    if (run.phase !== "queued" && run.phase !== "awaiting_approval") {
+    const safelyPausedHuman =
+      run.phase === "awaiting_human" &&
+      run.progress?.status === "awaiting_human" &&
+      run.progress.intervention.state === "awaiting_human";
+    if (run.phase !== "queued" && run.phase !== "awaiting_approval" && !safelyPausedHuman) {
       throw new RunManagerError(
         "RUN_NOT_CANCELLABLE",
-        "Only queued or approval-paused runs can be cancelled safely",
+        "Only queued, approval-paused, or unclaimed intervention runs can be cancelled safely",
       );
     }
     await this.#cancelRun(run, { code: "CANCELLED", reason });
@@ -491,14 +670,16 @@ export class RunManager {
     try {
       const now = this.#now();
       for (const run of [...this.#runs.values()]) {
-        if (run.phase === "awaiting_approval") {
+        if (run.phase === "awaiting_approval" || run.phase === "awaiting_human") {
           const challengeExpiry = run.progress?.status === "awaiting_approval"
             ? Date.parse(run.progress.challenge.expiresAt)
+            : run.progress?.status === "awaiting_human"
+              ? Date.parse(run.progress.intervention.expiresAt)
             : Number.POSITIVE_INFINITY;
           if (challengeExpiry <= now || now - run.updatedAtMs >= this.#retentionTtlMs) {
             await this.#cancelRun(run, {
               code: "TTL_EXPIRED",
-              reason: "Approval challenge or retained run expired",
+              reason: "Approval challenge, intervention, or retained run expired",
             });
             // TTL expiry is a terminal business-visible lifecycle event. Keep
             // it for the normal completed-run retention window so refresh and
@@ -525,7 +706,7 @@ export class RunManager {
     this.#closed = true;
     if (this.#cleanupTimer) clearInterval(this.#cleanupTimer);
     for (const run of [...this.#runs.values()]) {
-      if (run.phase === "queued" || run.phase === "awaiting_approval") {
+      if (run.phase === "queued" || run.phase === "awaiting_approval" || run.phase === "awaiting_human") {
         await this.#cancelRun(run, { code: "CANCELLED", reason: "Run manager shut down" });
       }
     }
@@ -565,6 +746,26 @@ export class RunManager {
         continue;
       }
 
+      const handoff = [...this.#runs.values()].find(
+        (run) =>
+          run.finalization === undefined &&
+          run.phase === "awaiting_human" &&
+          run.pendingHandoffResumeActor !== undefined,
+      );
+      if (handoff) {
+        this.#occupySlot(handoff);
+        handoff.phase = "running";
+        if (handoff.progress?.status === "awaiting_human") {
+          handoff.progress = {
+            ...handoff.progress,
+            intervention: { ...handoff.progress.intervention, state: "revalidating" },
+          };
+        }
+        this.#emit(handoff, "run.resuming", { kind: "same_session_handoff" });
+        this.#track(this.#resumeHuman(handoff));
+        continue;
+      }
+
       const queueIndex = this.#queue.findIndex((runId) => {
         const run = this.#runs.get(runId);
         return run?.phase === "queued" && !this.#sessionOwners.has(run.sessionRef);
@@ -599,9 +800,11 @@ export class RunManager {
           capabilityId: run.capabilityId,
           capabilityVersion: run.capabilityVersion,
           artifactDigest: run.artifactDigest,
+          ...(run.targetProfileDigest ? { targetProfileDigest: run.targetProfileDigest } : {}),
           inputDigest: run.inputDigest,
           sessionRef: run.sessionRef,
           inputs: run.inputs,
+          ...(run.orchestration ? { orchestration: run.orchestration } : {}),
         },
         context,
       );
@@ -631,6 +834,27 @@ export class RunManager {
     }
   }
 
+  async #resumeHuman(run: MutableRun): Promise<void> {
+    const actor = run.pendingHandoffResumeActor;
+    const runner = run.runner;
+    const interventionId = run.progress?.status === "awaiting_human"
+      ? run.progress.intervention.interventionId
+      : undefined;
+    run.pendingHandoffResumeActor = undefined;
+    if (!actor || !runner?.resumeHuman || !interventionId) {
+      await this.#managerFailed(run, "HANDOFF_STATE_INVALID", new Error("Handoff runner state is missing"));
+      return;
+    }
+    try {
+      await this.#handleProgress(
+        run,
+        await runner.resumeHuman(interventionId, { id: actor.id, roles: actor.roles }),
+      );
+    } catch (error) {
+      await this.#managerFailed(run, "HANDOFF_FAILED", error);
+    }
+  }
+
   async #handleProgress(run: MutableRun, progress: ReplayProgressV2): Promise<void> {
     run.progress = frozenClone(progress) as ReplayProgressV2;
     if (progress.status === "awaiting_approval") {
@@ -641,6 +865,26 @@ export class RunManager {
         stepId: progress.challenge.stepId,
         requirement: progress.challenge.requirement,
         expiresAt: progress.challenge.expiresAt,
+      });
+      this.#scheduleDrain();
+      return;
+    }
+    if (progress.status === "awaiting_human") {
+      run.phase = "awaiting_human";
+      run.handoffActor = undefined;
+      run.pendingHandoffResumeActor = undefined;
+      run.handoffActionCompleted = false;
+      this.#releaseSlot(run);
+      this.#emit(run, "intervention.requested", {
+        interventionId: progress.intervention.interventionId,
+        stepId: progress.intervention.stepId,
+        reasonCode: progress.intervention.reasonCode,
+        action: progress.intervention.action,
+        ...(progress.intervention.requiredRole
+          ? { requiredRole: progress.intervention.requiredRole }
+          : {}),
+        expiresAt: progress.intervention.expiresAt,
+        sameLiveSession: true,
       });
       this.#scheduleDrain();
       return;
@@ -695,10 +939,13 @@ export class RunManager {
       // copy immediately, not retain it for the history TTL.
       run.inputs = Object.freeze({});
       run.pendingApprovalActor = undefined;
+      run.handoffActor = undefined;
+      run.pendingHandoffResumeActor = undefined;
+      run.handoffActionCompleted = false;
       const safeCancellation = deepFreeze({
         code: cancellation.code,
         reason: cancellation.code === "TTL_EXPIRED"
-          ? "Approval expired before authorization; no pending effect was committed."
+          ? "The paused authorization or intervention expired before any pending effect was committed."
           : "The run was cancelled at a safe boundary.",
       } satisfies RunCancellation);
       run.cancellation = safeCancellation;
@@ -794,6 +1041,7 @@ export class RunManager {
       capabilityId: run.capabilityId,
       capabilityVersion: run.capabilityVersion,
       artifactDigest: run.artifactDigest,
+      ...(run.targetProfileDigest ? { targetProfileDigest: run.targetProfileDigest } : {}),
       inputDigest: run.inputDigest,
       inputNames: [...run.inputNames],
       sessionRef: run.sessionRef,
@@ -812,7 +1060,8 @@ export class RunManager {
       ...(run.managerFailure === undefined ? {} : { managerFailure: { ...run.managerFailure } }),
       ...(run.evidenceFinalization === undefined
         ? {}
-        : { evidenceFinalization: { ...run.evidenceFinalization } }),
+         : { evidenceFinalization: { ...run.evidenceFinalization } }),
+      ...(run.orchestration === undefined ? {} : { orchestration: { ...run.orchestration } }),
     });
   }
 
@@ -855,6 +1104,52 @@ export class RunManager {
     const run = this.#runs.get(runId);
     if (!run) throw new RunManagerError("RUN_NOT_FOUND", `Unknown run ${JSON.stringify(runId)}`);
     return run;
+  }
+
+  #requireHandoff(
+    runId: string,
+    interventionId: string,
+    actor: RunHandoffActor,
+  ): MutableRun {
+    const run = this.#requireRun(runId);
+    if ((actor as { source?: unknown }).source !== "user" && (actor as { source?: unknown }).source !== "operator") {
+      throw new RunManagerError(
+        "MODEL_APPROVAL_FORBIDDEN",
+        "Intervention control must originate from an authenticated user or operator",
+      );
+    }
+    if (!actor.id.trim() || actor.roles.length === 0) {
+      throw new RunManagerError("ROLE_REQUIRED", "Intervention actor identity and roles are required");
+    }
+    if (
+      run.finalization !== undefined ||
+      run.phase !== "awaiting_human" ||
+      run.progress?.status !== "awaiting_human" ||
+      run.progress.intervention.interventionId !== interventionId
+    ) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "Run is not awaiting this intervention");
+    }
+    const expiry = Date.parse(run.progress.intervention.expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= this.#now()) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The intervention has expired");
+    }
+    return run;
+  }
+
+  #assertHandoffOwner(run: MutableRun, actor: RunHandoffActor): void {
+    if (!run.handoffActor || run.handoffActor.id !== actor.id || run.handoffActor.source !== actor.source) {
+      throw new RunManagerError("RUN_NOT_HANDOFFABLE", "The active operator does not own this intervention");
+    }
+  }
+
+  #handoffError(error: unknown): RunManagerError {
+    const code = error && typeof error === "object" && "code" in error
+      ? String((error as { code: unknown }).code)
+      : undefined;
+    if (code === "ROLE_REQUIRED") {
+      return new RunManagerError("ROLE_REQUIRED", "The authenticated operator does not have the required role");
+    }
+    return new RunManagerError("RUN_NOT_HANDOFFABLE", "The intervention operation could not be completed safely");
   }
 
   #uniqueRunId(): string {

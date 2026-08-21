@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,9 +8,7 @@ import {
   canonicalArtifactDigest,
 } from "../../src/catalog/index.js";
 import {
-  CapabilityArtifactSchema,
   CapabilityArtifactV2Schema,
-  type CapabilityArtifact,
   type CapabilityArtifactV2,
 } from "../../src/domain/index.js";
 
@@ -24,20 +22,6 @@ async function scratchDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), "capability-catalog-test-"));
   cleanup.push(directory);
   return directory;
-}
-
-async function v1Artifact(options: {
-  id?: string;
-  version?: string;
-  approval?: "draft" | "approved" | "retired";
-} = {}): Promise<CapabilityArtifact> {
-  const checked = JSON.parse(await readFile(path.resolve("evidence/artifact.json"), "utf8")) as unknown;
-  const artifact = CapabilityArtifactSchema.parse(checked);
-  artifact.capability.id = options.id ?? "v1-capability";
-  artifact.capability.name = `Capability ${artifact.capability.id}`;
-  artifact.capability.version = options.version ?? "1.0.0";
-  artifact.capability.approval = options.approval ?? "approved";
-  return artifact;
 }
 
 function v2Artifact(options: {
@@ -127,35 +111,71 @@ async function save(directory: string, name: string, artifact: unknown): Promise
   await writeFile(path.join(directory, name), `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
 }
 
+function discoveredApprovedArtifact(): CapabilityArtifactV2 {
+  const base = v2Artifact({ id: "discovered-v2", version: "3.0.0", approval: "approved" });
+  return CapabilityArtifactV2Schema.parse({
+    ...base,
+    provenance: {
+      source: "discovery",
+      createdAt: "2026-08-20T12:00:00.000Z",
+      goal: "Read a stable synthetic value.",
+      discoveryRunId: "catalog-discovery-run",
+      planner: { provider: "anthropic-messages", model: "claude-sonnet-5" },
+    },
+  });
+}
+
+function approvedLineage(artifact: CapabilityArtifactV2, mode: "model" | "test_double" = "model") {
+  const approvedDigest = canonicalArtifactDigest(artifact);
+  const draftDigest = "a".repeat(64);
+  const reviewedDigest = "b".repeat(64);
+  const traceDigest = "c".repeat(64);
+  return {
+    schemaVersion: "1.0",
+    lineageId: "lineage.discovered-v2",
+    capabilityId: artifact.capability.id,
+    capabilityVersion: artifact.capability.version,
+    stage: "approved",
+    discovery: {
+      runId: "catalog-discovery-run",
+      provider: "anthropic-messages",
+      model: "claude-sonnet-5",
+      mode,
+      traceDigest,
+    },
+    draftDigest,
+    reviewedDigest,
+    approvedDigest,
+    events: [
+      { type: "draft_created", at: "2026-08-20T12:00:00.000Z", actor: "discovery_compiler", artifactDigest: draftDigest, traceDigest },
+      { type: "reviewed", at: "2026-08-20T12:01:00.000Z", actor: "reviewer-1", artifactDigest: reviewedDigest, parentArtifactDigest: draftDigest, reviewDiffDigest: "d".repeat(64), changedPathCount: 0 },
+      { type: "canary_passed", at: "2026-08-20T12:02:00.000Z", actor: "canary_runner", artifactDigest: reviewedDigest, canaryRunId: "canary-1", evidenceDigest: "e".repeat(64) },
+      { type: "approved", at: "2026-08-20T12:03:00.000Z", actor: "approver-1", artifactDigest: approvedDigest, parentArtifactDigest: reviewedDigest },
+    ],
+  };
+}
+
 describe("CapabilityCatalog", () => {
-  it("loads validated V1 and V2 artifacts and returns immutable approved metadata", async () => {
+  it("loads validated V2 artifacts and returns immutable approved metadata", async () => {
     const directory = await scratchDirectory();
-    await save(directory, "legacy.json", await v1Artifact());
     await save(directory, "current.json", v2Artifact({ risk: "supervisor_only" }));
 
     const catalog = await CapabilityCatalog.load({ directories: [directory] });
     const metadata = catalog.list();
 
-    expect(metadata.map((item) => `${item.id}@${item.version}`)).toEqual([
-      "v1-capability@1.0.0",
-      "v2-capability@2.0.0",
-    ]);
+    expect(metadata.map((item) => `${item.id}@${item.version}`)).toEqual(["v2-capability@2.0.0"]);
     expect(metadata[0]).toMatchObject({
-      schemaVersion: "1.0",
-      approval: "approved",
-      risk: "write",
-      digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-    });
-    expect(metadata[1]).toMatchObject({
       schemaVersion: "2.0",
+      approval: "approved",
       risk: "supervisor_only",
+      digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       inputs: [expect.objectContaining({ name: "memberNumber" })],
       outputs: [expect.objectContaining({ name: "memberName" })],
     });
     expect(Object.isFrozen(metadata)).toBe(true);
-    expect(Object.isFrozen(metadata[1])).toBe(true);
-    expect(Object.isFrozen(metadata[1]!.inputs)).toBe(true);
-    expect(Object.isFrozen(metadata[1]!.inputs[0])).toBe(true);
+    expect(Object.isFrozen(metadata[0])).toBe(true);
+    expect(Object.isFrozen(metadata[0]!.inputs)).toBe(true);
+    expect(Object.isFrozen(metadata[0]!.inputs[0])).toBe(true);
     expect(Object.isFrozen(catalog.resolve("v2-capability", "2.0.0")!.artifact)).toBe(true);
   });
 
@@ -189,6 +209,25 @@ describe("CapabilityCatalog", () => {
     });
   });
 
+  it("rejects legacy capability contracts at the catalog boundary", async () => {
+    const directory = await scratchDirectory();
+    await save(directory, "legacy.json", {
+      schemaVersion: "1.0",
+      capability: {
+        id: "legacy-capability",
+        name: "Legacy capability",
+        description: "An obsolete compatibility contract.",
+        version: "1.0.0",
+        approval: "approved",
+      },
+    });
+
+    await expect(CapabilityCatalog.load({ directories: [directory] })).rejects.toMatchObject({
+      code: "ARTIFACT_INVALID",
+      message: expect.stringContaining("unsupported capability schema version"),
+    });
+  });
+
   it("uses canonical validated JSON for stable digests", async () => {
     const artifact = v2Artifact();
     const differentlyOrdered = {
@@ -208,6 +247,60 @@ describe("CapabilityCatalog", () => {
     expect(canonicalArtifactDigest(artifact)).toBe(
       canonicalArtifactDigest(CapabilityArtifactV2Schema.parse(differentlyOrdered)),
     );
+  });
+
+  it("validates approved discovery lineage and exposes only digest-safe metadata", async () => {
+    const artifacts = await scratchDirectory();
+    const lineages = await scratchDirectory();
+    const artifact = discoveredApprovedArtifact();
+    await save(artifacts, "discovered.json", artifact);
+    await save(lineages, "discovered.lineage.json", approvedLineage(artifact));
+
+    const catalog = await CapabilityCatalog.load({
+      directories: [artifacts],
+      lineageDirectories: [lineages],
+      requireDiscoveryLineage: true,
+    });
+    expect(catalog.get(artifact.capability.id, artifact.capability.version)?.lineage).toEqual({
+      lineageId: "lineage.discovered-v2",
+      discoveryRunId: "catalog-discovery-run",
+      provider: "anthropic-messages",
+      model: "claude-sonnet-5",
+      traceDigest: "c".repeat(64),
+      draftDigest: "a".repeat(64),
+      reviewedDigest: "b".repeat(64),
+      approvedDigest: canonicalArtifactDigest(artifact),
+      canaryRunId: "canary-1",
+    });
+  });
+
+  it("rejects missing, test-double, and digest-mismatched discovery lineage", async () => {
+    const artifacts = await scratchDirectory();
+    const lineages = await scratchDirectory();
+    const artifact = discoveredApprovedArtifact();
+    await save(artifacts, "discovered.json", artifact);
+    await expect(CapabilityCatalog.load({
+      directories: [artifacts],
+      lineageDirectories: [],
+      requireDiscoveryLineage: true,
+    })).rejects.toMatchObject({ code: "LINEAGE_MISSING" });
+
+    await save(lineages, "test-double.json", approvedLineage(artifact, "test_double"));
+    await expect(CapabilityCatalog.load({
+      directories: [artifacts],
+      lineageDirectories: [lineages],
+    })).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
+
+    await rm(lineages, { recursive: true, force: true });
+    const replacement = await scratchDirectory();
+    const mismatch = approvedLineage(artifact) as { approvedDigest: string; events: Array<Record<string, unknown>> };
+    mismatch.approvedDigest = "f".repeat(64);
+    mismatch.events[3]!.artifactDigest = mismatch.approvedDigest;
+    await save(replacement, "mismatch.json", mismatch);
+    await expect(CapabilityCatalog.load({
+      directories: [artifacts],
+      lineageDirectories: [replacement],
+    })).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
   });
 
   it("rejects invalid artifacts and configured file paths without exposing a path lookup API", async () => {

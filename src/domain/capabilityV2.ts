@@ -196,11 +196,31 @@ export const LocatorStrategyV2Schema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), text: NonEmptySchema, exact: z.boolean() }).strict(),
   z
     .object({
+      kind: z.literal("navigation_link"),
+      name: NonEmptySchema,
+      exact: z.boolean(),
+      companionText: NonEmptySchema,
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("label_value"),
       label: NonEmptySchema,
       valueCellOffset: z.number().int().min(1).max(8).default(1),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("label_value_expr"),
+      label: ValueExprV2Schema,
+      prefix: z.string().max(160).default(""),
+      suffix: z.string().max(160).default(""),
+      valueCellOffset: z.number().int().min(1).max(8).default(1),
+    })
+    .strict()
+    .refine((strategy) => strategy.prefix.length > 0 || strategy.suffix.length > 0, {
+      message: "Expression-backed labels require an authored prefix or suffix",
+    }),
   z
     .object({
       kind: z.literal("table"),
@@ -223,6 +243,24 @@ export const LocatorStrategyV2Schema = z.discriminatedUnion("kind", [
       addDuplicateIssues(strategy.headers, context, ["headers"], "table header");
       if (!strategy.headers.includes(strategy.keyColumn)) {
         context.addIssue({ code: "custom", path: ["keyColumn"], message: "keyColumn must be one of the declared headers" });
+      }
+    }),
+  z
+    .object({
+      kind: z.literal("table_row_value"),
+      headers: z.array(NonEmptySchema).min(1),
+      keyColumn: NonEmptySchema,
+      key: ValueExprV2Schema,
+      valueColumn: NonEmptySchema,
+    })
+    .strict()
+    .superRefine((strategy, context) => {
+      addDuplicateIssues(strategy.headers, context, ["headers"], "table header");
+      if (!strategy.headers.includes(strategy.keyColumn)) {
+        context.addIssue({ code: "custom", path: ["keyColumn"], message: "keyColumn must be one of the declared headers" });
+      }
+      if (!strategy.headers.includes(strategy.valueColumn)) {
+        context.addIssue({ code: "custom", path: ["valueColumn"], message: "valueColumn must be one of the declared headers" });
       }
     }),
 ]);
@@ -264,6 +302,10 @@ export const ActionV2Schema = z.discriminatedUnion("kind", [
       outputName: IdSchema.optional(),
       bindingName: IdSchema.optional(),
       source: z.enum(["text", "value"]).default("text"),
+      transform: z
+        .object({ kind: z.literal("strip_exact_suffix"), suffix: NonEmptySchema })
+        .strict()
+        .optional(),
     })
     .strict()
     .refine((value) => Boolean(value.outputName) !== Boolean(value.bindingName), {
@@ -395,7 +437,7 @@ export const RuntimeStateRuleV2Schema = z
   .object({
     code: IdSchema,
     description: NonEmptySchema,
-    category: z.enum(["business_outcome", "recoverable", "failure", "escalation"]),
+    category: z.enum(["business_outcome", "recoverable", "failure", "escalation", "intervention"]),
     priority: z.number().int().min(0).max(1_000),
     condition: ConditionV2Schema,
     effectCertainty: z.enum(["unknown", "not_applied"]).optional(),
@@ -410,11 +452,56 @@ export const RuntimeStateRuleV2Schema = z
       })
       .strict()
       .optional(),
+    handoff: z
+      .object({
+        kind: z.literal("same_session"),
+        action: z.enum(["restore_session", "authenticate_supervisor"]),
+        resume: z.object({ kind: z.literal("restart_run") }).strict(),
+        revalidate: z.array(ConditionV2Schema).min(1),
+        expiresInMs: z.number().int().min(5_000).max(900_000),
+        trigger: z
+          .object({ kind: z.literal("capability_role"), role: IdSchema })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((rule, context) => {
-    if (rule.requiredRole && rule.category !== "escalation") {
-      context.addIssue({ code: "custom", path: ["requiredRole"], message: "requiredRole is valid only for escalation states" });
+    if (rule.requiredRole && rule.category !== "escalation" && rule.category !== "intervention") {
+      context.addIssue({
+        code: "custom",
+        path: ["requiredRole"],
+        message: "requiredRole is valid only for escalation or intervention states",
+      });
+    }
+    if (rule.category === "intervention" && !rule.handoff) {
+      context.addIssue({ code: "custom", path: ["handoff"], message: "Intervention states require a handoff directive" });
+    }
+    if (rule.category !== "intervention" && rule.handoff) {
+      context.addIssue({ code: "custom", path: ["handoff"], message: "Only intervention states may declare handoff" });
+    }
+    if (rule.category === "intervention" && rule.effectCertainty !== "not_applied") {
+      context.addIssue({
+        code: "custom",
+        path: ["effectCertainty"],
+        message: "Intervention states must prove that no effect was applied",
+      });
+    }
+    if (rule.handoff?.action === "authenticate_supervisor" && rule.requiredRole !== "supervisor") {
+      context.addIssue({
+        code: "custom",
+        path: ["requiredRole"],
+        message: "Supervisor authentication handoff requires the supervisor role",
+      });
+    }
+    if (rule.handoff?.trigger && rule.requiredRole !== rule.handoff.trigger.role) {
+      context.addIssue({
+        code: "custom",
+        path: ["handoff", "trigger", "role"],
+        message: "Handoff trigger role must match requiredRole",
+      });
     }
   });
 export type RuntimeStateRuleV2 = z.infer<typeof RuntimeStateRuleV2Schema>;
@@ -598,7 +685,10 @@ export const CapabilityArtifactV2Schema = z
     };
     for (const [targetIndex, target] of artifact.targets.entries()) {
       for (const [strategyIndex, strategy] of target.strategies.entries()) {
-        if (strategy.kind === "table_row_control") verifyValue(strategy.key, ["targets", targetIndex, "strategies", strategyIndex, "key"]);
+        if (strategy.kind === "table_row_control" || strategy.kind === "table_row_value") {
+          verifyValue(strategy.key, ["targets", targetIndex, "strategies", strategyIndex, "key"]);
+        }
+        if (strategy.kind === "label_value_expr") verifyValue(strategy.label, ["targets", targetIndex, "strategies", strategyIndex, "label"]);
       }
     }
     for (const [index, step] of artifact.steps.entries()) {
@@ -726,6 +816,9 @@ export const CapabilityArtifactV2Schema = z
     }
     artifact.runtimeStates.forEach((state, index) => {
       verifyCondition(state.condition, ["runtimeStates", index, "condition"]);
+      state.handoff?.revalidate.forEach((condition, conditionIndex) => {
+        verifyCondition(condition, ["runtimeStates", index, "handoff", "revalidate", conditionIndex]);
+      });
       if (state.recovery?.stepId && !steps.has(state.recovery.stepId)) {
         context.addIssue({ code: "custom", path: ["runtimeStates", index, "recovery", "stepId"], message: `Unknown restart step: ${state.recovery.stepId}` });
       }

@@ -1,0 +1,27 @@
+{
+  "scenario": "hold-supervisor-handoff",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "account.place_hold",
+    "outputKeys": [
+      "applied_at",
+      "confirmation",
+      "share_status",
+      "share_status_before"
+    ],
+    "incidentCodes": [
+      "SUPERVISOR_REQUIRED"
+    ]
+  },
+  "assertion": {
+    "newSharePreparedForHold": true,
+    "sameLiveSession": true,
+    "supervisorReauthenticated": true,
+    "exactSupervisorApproval": true,
+    "oneHoldCommitAttempt": true,
+    "receiptVerified": true,
+    "readAfterWriteVerified": true
+  },
+  "plannerCallsAllowed": false
+}

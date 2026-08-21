@@ -1,0 +1,25 @@
+{
+  "scenario": "maintenance-recovery",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "member.get_record_and_balances",
+    "outputKeys": [
+      "address",
+      "email",
+      "member_name",
+      "member_number",
+      "phone",
+      "shares"
+    ],
+    "incidentCodes": [
+      "MAINTENANCE"
+    ]
+  },
+  "assertion": {
+    "injectedFault": true,
+    "boundedRecoveryAttempts": 1,
+    "eventualSuccess": true
+  },
+  "plannerCallsAllowed": false
+}

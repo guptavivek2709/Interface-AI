@@ -398,7 +398,18 @@ function injectedState(
     400: { code: "VALIDATION_REJECTED", category: "business_outcome", effectCertainty: "not_applied" },
     403: { code: "SUPERVISOR_REQUIRED", category: "escalation", requiredRole: "supervisor" },
     404: { code: "RECORD_NOT_FOUND", category: "business_outcome", effectCertainty: "not_applied" },
-    440: { code: "SESSION_EXPIRED", category: "escalation" },
+    440: {
+      code: "SESSION_EXPIRED",
+      category: "intervention",
+      effectCertainty: "not_applied",
+      handoff: {
+        kind: "same_session",
+        action: "restore_session",
+        resume: { kind: "restart_run" },
+        revalidate: [{ kind: "route", pattern: "^/review$" }],
+        expiresInMs: 30_000,
+      },
+    },
     500: { code: "APPLICATION_ERROR", category: "failure" },
     503: { code: "MAINTENANCE", category: "recoverable" },
   } as const;
@@ -411,6 +422,9 @@ function injectedState(
     condition: { kind: "http_status", status },
     ...("effectCertainty" in definition ? { effectCertainty: definition.effectCertainty } : {}),
     ...("requiredRole" in definition ? { requiredRole: definition.requiredRole } : {}),
+    ...("handoff" in definition
+      ? { handoff: { ...definition.handoff, revalidate: [...definition.handoff.revalidate] } }
+      : {}),
     ...(status === 503
       ? { recovery: { kind: "restart_run", maxAttempts: 1, waitMs: 0 } as const }
       : {}),
@@ -616,6 +630,177 @@ describe("ReplayRunnerV2", () => {
     })).toThrow(/lowercase SHA-256/u);
   });
 
+  it("transfers control before a commit, restores the same session, and requires a fresh approval", async () => {
+    const runtime = new FakeRuntime();
+    const runner = new ReplayRunnerV2({
+      artifact: artifact({ runtimeStates: [injectedState(440)] }),
+      inputs: {},
+      runtime,
+      approvalAuthority: new ApprovalAuthority({ secret: Buffer.alloc(32, 29) }),
+      restoreSession: async () => {
+        runtime.state = {
+          url: "https://bank.test/review",
+          title: "Review",
+          httpStatus: 200,
+          method: "GET",
+        };
+      },
+    });
+
+    const approval = await runner.run();
+    expect(approval.status).toBe("awaiting_approval");
+    const token = runner.issueApproval({ id: "operator-1", roles: ["teller"] });
+    runtime.state.httpStatus = 440;
+    const paused = await runner.resume(token);
+    expect(paused.status).toBe("awaiting_human");
+    if (paused.status !== "awaiting_human") throw new Error("Expected human intervention");
+    expect(paused.intervention).toMatchObject({
+      reasonCode: "SESSION_EXPIRED",
+      action: "restore_session",
+      state: "awaiting_human",
+      sameLiveSession: true,
+    });
+    expect(runtime.clickCount).toBe(0);
+
+    await expect(
+      runner.performHumanAction(
+        paused.intervention.interventionId,
+        { id: "operator-1", roles: ["teller"] },
+        "restore_session",
+      ),
+    ).rejects.toMatchObject({ code: "HANDOFF_STATE_INVALID" });
+    const claimed = await runner.takeHumanControl(
+      paused.intervention.interventionId,
+      { id: "operator-1", roles: ["teller"] },
+    );
+    expect(claimed).toMatchObject({ status: "awaiting_human", intervention: { state: "human_active" } });
+    await expect(
+      runner.resumeHuman(
+        paused.intervention.interventionId,
+        { id: "operator-1", roles: ["teller"] },
+      ),
+    ).rejects.toMatchObject({ code: "HANDOFF_STATE_INVALID" });
+    const acted = await runner.performHumanAction(
+      paused.intervention.interventionId,
+      { id: "operator-1", roles: ["teller"] },
+      "restore_session",
+    );
+    expect(acted).toMatchObject({
+      status: "awaiting_human",
+      intervention: { state: "action_completed" },
+    });
+    const resumed = await runner.resumeHuman(
+      paused.intervention.interventionId,
+      { id: "operator-1", roles: ["teller"] },
+    );
+    expect(resumed.status).toBe("awaiting_approval");
+    expect(runtime.clickCount).toBe(0);
+
+    const freshToken = runner.issueApproval({ id: "operator-1", roles: ["teller"] });
+    const completed = await runner.resume(freshToken);
+    if (completed.status !== "terminal") throw new Error("Expected terminal result");
+    expect(completed.result).toMatchObject({ status: "success" });
+    expect(completed.result.incidents).toContainEqual(
+      expect.objectContaining({ code: "SESSION_EXPIRED", category: "intervention" }),
+    );
+    expect(runtime.clickCount).toBe(1);
+  });
+
+  it("fails closed when the live runtime identity changes during intervention", async () => {
+    const runtime = new FakeRuntime();
+    runtime.state.httpStatus = 440;
+    const runner = new ReplayRunnerV2({
+      artifact: artifact({ runtimeStates: [injectedState(440)] }),
+      inputs: {},
+      runtime,
+      approvalAuthority: new ApprovalAuthority({ secret: Buffer.alloc(32, 30) }),
+      restoreSession: async () => {
+        runtime.state.httpStatus = 200;
+        (runtime as unknown as { sessionId: string }).sessionId = "replacement-session";
+      },
+    });
+    const paused = await runner.run();
+    if (paused.status !== "awaiting_human") throw new Error("Expected human intervention");
+    const actor = { id: "operator-1", roles: ["teller"] };
+    await runner.takeHumanControl(paused.intervention.interventionId, actor);
+    await runner.performHumanAction(paused.intervention.interventionId, actor, "restore_session");
+    const completed = await runner.resumeHuman(paused.intervention.interventionId, actor);
+    if (completed.status !== "terminal") throw new Error("Expected terminal result");
+    expect(completed.result).toMatchObject({
+      status: "failure",
+      code: "HANDOFF_REVALIDATION_FAILED",
+      effectUncertain: false,
+    });
+  });
+
+  it("delegates a supervisor-only capability before any commit and rebinds approval to the supervisor", async () => {
+    const runtime = new FakeRuntime();
+    let principalRole = "teller";
+    const supervisorRule: RuntimeStateRuleV2 = {
+      code: "SUPERVISOR_REQUIRED",
+      description: "A supervisor must take over this same session",
+      category: "intervention",
+      priority: 100,
+      condition: { kind: "http_status", status: 403 },
+      effectCertainty: "not_applied",
+      requiredRole: "supervisor",
+      handoff: {
+        kind: "same_session",
+        action: "authenticate_supervisor",
+        resume: { kind: "restart_run" },
+        revalidate: [{ kind: "route", pattern: "^/review$" }],
+        expiresInMs: 30_000,
+        trigger: { kind: "capability_role", role: "supervisor" },
+      },
+    };
+    const runner = new ReplayRunnerV2({
+      artifact: artifact({
+        risk: "supervisor_only",
+        approvalKind: "supervisor_confirmation",
+        runtimeStates: [supervisorRule],
+      }),
+      inputs: {},
+      runtime,
+      approvalAuthority: new ApprovalAuthority({ secret: Buffer.alloc(32, 31) }),
+      currentPrincipalRole: () => principalRole,
+      authenticateSupervisor: async () => {
+        principalRole = "supervisor";
+      },
+    });
+
+    const paused = await runner.run();
+    if (paused.status !== "awaiting_human") throw new Error("Expected supervisor intervention");
+    expect(paused.intervention).toMatchObject({
+      reasonCode: "SUPERVISOR_REQUIRED",
+      action: "authenticate_supervisor",
+      requiredRole: "supervisor",
+      sameLiveSession: true,
+    });
+    expect(runtime.clickCount).toBe(0);
+    await expect(
+      runner.takeHumanControl(paused.intervention.interventionId, { id: "teller", roles: ["teller"] }),
+    ).rejects.toMatchObject({ code: "ROLE_REQUIRED" });
+
+    const supervisor = { id: "supervisor", roles: ["supervisor"] };
+    await runner.takeHumanControl(paused.intervention.interventionId, supervisor);
+    await runner.performHumanAction(
+      paused.intervention.interventionId,
+      supervisor,
+      "authenticate_supervisor",
+    );
+    const approval = await runner.resumeHuman(paused.intervention.interventionId, supervisor);
+    expect(approval.status).toBe("awaiting_approval");
+    expect(runtime.clickCount).toBe(0);
+    expect(() => runner.issueApproval({ id: "teller", roles: ["teller"] })).toThrowError(
+      expect.objectContaining({ code: "ROLE_REQUIRED" }),
+    );
+    const token = runner.issueApproval(supervisor);
+    const completed = await runner.resume(token);
+    if (completed.status !== "terminal") throw new Error("Expected terminal result");
+    expect(completed.result.status).toBe("success");
+    expect(runtime.clickCount).toBe(1);
+  });
+
   it("treats a lost response from a reversible write as uncertain", async () => {
     const runtime = new FakeRuntime();
     runtime.throwAfterCommit = true;
@@ -642,7 +827,6 @@ describe("ReplayRunnerV2", () => {
     [400, "business_outcome", "VALIDATION_REJECTED"],
     [403, "escalation", "SUPERVISOR_REQUIRED"],
     [404, "business_outcome", "RECORD_NOT_FOUND"],
-    [440, "escalation", "SESSION_EXPIRED"],
     [500, "failure", "APPLICATION_ERROR"],
     [503, "failure", "RECOVERY_EXHAUSTED"],
   ] as const)("classifies injected HTTP %i before any effect", async (status, resultStatus, code) => {
@@ -668,7 +852,7 @@ describe("ReplayRunnerV2", () => {
     expect(runtime.clickCount).toBe(0);
   });
 
-  it.each([403, 440, 500] as const)(
+  it.each([403, 500] as const)(
     "captures redacted screenshot, DOM, and event evidence for injected HTTP %i",
     async (status) => {
       const scratch = await mkdtemp(path.join(tmpdir(), `replay-v2-${status}-evidence-`));

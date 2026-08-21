@@ -56,6 +56,29 @@ describe("SessionManager", () => {
     await second.release();
   });
 
+  it("rebinds the principal only for the run holding the same live-session lease", async () => {
+    const manager = new SessionManager<Resource>();
+    manager.registerProvisioning(ref, new Resource());
+    const teller = { operatorId: "teller1", role: "teller" as const, branch: "001" };
+    const supervisor = { operatorId: "super1", role: "supervisor" as const, branch: "001" };
+    manager.activate(ref, teller);
+    const lease = await manager.acquire(ref, "run-1");
+
+    expect(() => manager.rebindPrincipal(ref, "other-run", teller, supervisor)).toThrowError(
+      expect.objectContaining({ code: "SESSION_NOT_ACTIVE" }),
+    );
+    expect(manager.rebindPrincipal(ref, "run-1", teller, supervisor)).toMatchObject({
+      state: "busy",
+      activeRunId: "run-1",
+      principal: supervisor,
+    });
+    expect(lease.principal).toEqual(teller);
+    await lease.release();
+    const reboundLease = await manager.acquire(ref, "run-2");
+    expect(reboundLease.principal).toEqual(supervisor);
+    await reboundLease.release();
+  });
+
   it("expires only idle sessions and closes their resource", async () => {
     let time = 0;
     const resource = new Resource();

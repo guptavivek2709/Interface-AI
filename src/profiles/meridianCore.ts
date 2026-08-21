@@ -1,8 +1,16 @@
 import type { PlaywrightSurfaceOptions } from "../surface/playwright/playwrightSurface.js";
+import {
+  TargetInstanceProfileV2Schema,
+  type TargetInstanceProfileV2,
+} from "./targetProfileV2.js";
 
 export const MERIDIAN_DEFAULT_ORIGIN = "https://web-sample.interface-hiring.com";
+/** Stable placeholder used only inside reusable vendor artifacts. */
+export const MERIDIAN_VENDOR_ORIGIN = "https://meridian-core.vendor.invalid";
 export const MERIDIAN_PRODUCT = "Meridian Core";
 export const MERIDIAN_ADAPTER = "playwright-web-meridian-v2";
+export const MERIDIAN_APP_VERSION = "4.2.1";
+export const MERIDIAN_PROFILE_CREATED_AT = "2026-08-20T18:00:00.000Z";
 
 const DOCUMENT_PATH =
   /^\/(?:signon|signoff|menu|members(?:\/[0-9]{6}(?:\/(?:transfer|open-share|update|hold)(?:\/(?:review|post))?)?)?)$/u;
@@ -60,4 +68,20 @@ export function createMeridianSurfaceOptions(
 
 export function meridianEntryPoint(origin = MERIDIAN_DEFAULT_ORIGIN): string {
   return `${normalizeMeridianOrigin(origin)}/signon`;
+}
+
+export function createMeridianTargetProfile(options: {
+  readonly origin?: string;
+  readonly id?: string;
+  readonly appVersion?: string;
+} = {}): TargetInstanceProfileV2 {
+  return TargetInstanceProfileV2Schema.parse({
+    schemaVersion: "1.0",
+    id: options.id ?? "meridian.default",
+    vendorProduct: MERIDIAN_PRODUCT,
+    surfaceAdapter: MERIDIAN_ADAPTER,
+    origin: normalizeMeridianOrigin(options.origin ?? MERIDIAN_DEFAULT_ORIGIN),
+    appVersion: options.appVersion ?? MERIDIAN_APP_VERSION,
+    createdAt: MERIDIAN_PROFILE_CREATED_AT,
+  });
 }

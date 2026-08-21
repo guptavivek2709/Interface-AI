@@ -63,23 +63,10 @@ function v2InputSchema(fields: readonly FieldSpecV2[]): z.ZodType {
   return z.object(shape).strict();
 }
 
-function v1InputSchema(
-  fields: ReadonlyArray<{
-    name: string;
-    description: string;
-    type: "string" | "number" | "boolean";
-    required: boolean;
-    pattern?: string | undefined;
-    enum?: readonly (string | number | boolean | null)[] | undefined;
-  }>,
-): z.ZodType {
+function v2OutputSchema(fields: readonly FieldSpecV2[]): z.ZodType {
   const shape: Record<string, z.ZodType> = Object.create(null) as Record<string, z.ZodType>;
   for (const field of fields) {
-    let schema: z.ZodType = field.type === "string" ? z.string() : field.type === "number" ? z.number() : z.boolean();
-    if (field.pattern && field.type === "string") schema = (schema as z.ZodString).regex(new RegExp(field.pattern, "u"));
-    if (field.enum) schema = schema.refine((value) => field.enum?.includes(value as never) === true, "Value is not allowed");
-    schema = schema.describe(field.description);
-    shape[field.name] = field.required ? schema : schema.optional();
+    shape[field.name] = v2TypeSchema(field.type).describe(field.description);
   }
   return z.object(shape).strict();
 }
@@ -94,21 +81,20 @@ export function catalogEntryToChatTool(entry: CapabilityCatalogEntry): ChatToolD
   if (
     entry.artifact.inputs.some(
       (field) =>
-        SECRET_NAME.test(field.name) ||
-        (entry.artifact.schemaVersion === "2.0" && field.classification === "secret"),
+        SECRET_NAME.test(field.name) || field.classification === "secret",
     )
   ) {
     return undefined;
   }
-  const inputSchema = entry.artifact.schemaVersion === "2.0"
-    ? v2InputSchema(entry.artifact.inputs as readonly FieldSpecV2[])
-    : v1InputSchema(entry.artifact.inputs);
+  const inputSchema = v2InputSchema(entry.artifact.inputs as readonly FieldSpecV2[]);
+  const outputSchema = v2OutputSchema(entry.artifact.outputs as readonly FieldSpecV2[]);
   return {
     name: entry.metadata.id.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 64),
     capabilityId: entry.metadata.id,
     capabilityVersion: entry.metadata.version,
     description: entry.artifact.capability.description,
     inputSchema,
+    outputSchema,
   };
 }
 

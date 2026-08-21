@@ -1,223 +1,381 @@
 # MERIDIAN Capability Console
 
-This project adapts a legacy, server-rendered MERIDIAN Core banking UI into a fast operator console backed by versioned, deterministic capabilities. Anthropic can interpret natural-language requests and propose one approved capability; it never receives credentials, approves a write, or controls replay. Once a user starts a run, the executor follows the reviewed artifact with no model in the decision loop.
+This repository adapts the discover-once, deterministic-replay core to the live [MERIDIAN Core sample](https://web-sample.interface-hiring.com/). It delivers all eight required V2 capabilities as a typed API, an Anthropic-driven assistant that launches the approved API operations, and a React dashboard for sessions, runs, approvals, handoff, reconciliation, and evidence.
 
-The earlier synthetic Legacy UI Capability Engine remains in the repository as a regression harness and genuine-discovery evidence bundle. The current production-shaped path is the V2 catalog, API, session manager, MERIDIAN adapter, and React console described here.
+Anthropic is the only model provider. It is used for intent routing and discovery; it never receives MERIDIAN credentials, issues approval authority, or participates in deterministic replay. The production application loads only immutable V2 artifacts whose approved discovery lineage matches their canonical SHA-256 digest.
 
-## Delivered upgrade
+## Delivered capability surface
 
-Eight immutable V2 capabilities cover the required MERIDIAN surface:
-
-| Capability | Effect | Result |
+| Capability ID | Role/effect | Typed result or boundary |
 | --- | --- | --- |
-| `session.sign_on` | Authentication | Creates a server-owned, memory-only browser session from an authorized credential profile. |
-| `member.search_by_number` | Read | Returns matching member rows without guessing among duplicate `Select` links. |
-| `member.search_by_last_name` | Read | Returns a structured list and preserves multiple-match semantics. |
-| `member.get_record_and_balances` | Read | Returns member details plus typed share and money rows. |
-| `funds.transfer` | Irreversible | Builds a transfer, stops at review, and requires a bound, expiring confirmation before one final post. |
-| `share.open` | Irreversible | Reviews a new share and initial deposit before one confirmed final post. |
-| `member.update_information` | Write | Reviews contact fields locally before a direct save. |
-| `account.place_hold` | Supervisor-only | Requires both a supervisor console identity and supervisor MERIDIAN session before the run starts. |
+| `session.sign_on` | Teller or supervisor authentication | Establishes a server-owned, memory-only MERIDIAN browser session. |
+| `member.search_by_number` | Read | Returns exact structured member matches. |
+| `member.search_by_last_name` | Read | Returns a collection and preserves multiple-match semantics. |
+| `member.get_record_and_balances` | Read | Returns member details and typed share/balance/status rows. |
+| `funds.transfer` | Irreversible write | Reviews member, shares, amount, and memo before one final post. |
+| `share.open` | Irreversible write | Reviews share type and initial deposit before one final post. |
+| `member.update_information` | Write | Reviews email, phone, and address before one save. |
+| `account.place_hold` | Supervisor-only write | Requires supervisor identity, same-session handoff when needed, review, and one final post. |
 
-All capabilities use exact origin and anchored route rules, exact-one semantic locators, typed inputs/outputs, explicit effects, declared runtime outcomes, and a final checkpoint. The catalog resolves only approved artifacts and binds every submission to the reviewed SHA-256 digest.
+The submitted catalog contains all eight artifacts at `2.0.0` plus separate approved lineage records. Exact route/origin policy, typed inputs and outputs, semantic targets, runtime-state handling, write effects, approval requirements, and final checkpoints are part of each artifact rather than hidden in the UI wrapper.
 
-## Architecture
+## Architecture and trust boundaries
 
 ```mermaid
 flowchart LR
-    U["Authenticated operator"] --> W["React console"]
-    W -->|"REST + SSE"| A["Fastify capability API"]
-    W -->|"intent only"| C["Chat router"]
-    C -->|"strict tool proposal"| H["Anthropic Messages API"]
-    C -->|"proposal"| W
-    A --> G["Approved catalog"]
-    A --> Q["Bounded run manager"]
-    Q --> R["Model-free replay"]
-    R --> P["Playwright MERIDIAN adapter"]
-    P --> M["MERIDIAN Core v4.2.1"]
-    R --> E["Redacted evidence"]
-    A --> I["Identity + ownership boundary"]
-    A --> S["Memory-only browser sessions"]
-    A --> T["One-time approval authority"]
+    O[Authenticated operator] --> UI[React console]
+    UI -->|chat request| API[Fastify API]
+    API -->|strict tools| A[Anthropic Messages API]
+    A -->|reply or bound proposal| API
+    UI -->|exact REST run request| API
+    API --> CAT[Approved V2 catalog + lineage]
+    API --> RM[Session and run managers]
+    RM --> RR[Model-free V2 replay]
+    RR --> PW[Playwright MERIDIAN adapter]
+    PW --> M[Live MERIDIAN Core]
+    RR --> EV[Redacted evidence]
 ```
 
-The important separation is deliberate:
+The boundaries are intentionally small:
 
-- Anthropic is a replaceable chat/intent provider. It receives only redacted conversation text and strict, secret-free tool schemas.
-- REST, SSE, capability contracts, sessions, and replay are provider-neutral application infrastructure.
-- Replay is surface-neutral through `ReplayRuntimeV2`; Playwright is the current web implementation.
-- Browser sessions, MERIDIAN credentials, anti-CSRF tokens, approval tokens, and operator identity are outside the model boundary.
+- The model sees redacted chat text and strict, secret-free capability schemas, or privacy-safe discovery observations.
+- The browser session, MERIDIAN credentials and cookies, hidden transaction tokens, console identity, idempotency bindings, and approval tokens remain server-side.
+- Replay consumes an approved artifact and typed inputs with `plannerCallsAllowed: false`; no model is in its decision loop.
+- The React client and API bind every run to capability ID, version, artifact digest, target-profile digest, authenticated owner, and server-owned target session.
 
-These interfaces make future AI providers, native desktop adapters, queues, durable stores, identity systems, and policy engines additive rather than rewrites. See [REPORT.md](REPORT.md) for the extension seams and safety rationale.
+## Quick start
 
-## Guardrails
-
-The console fails closed at each boundary:
-
-- The server binds to loopback by default, sends a strict CSP and no CORS permission, requires a same-origin mutation header, and authenticates all non-health API routes.
-- A console access code is exchanged once for an opaque `HttpOnly; SameSite=Strict` cookie. The built-in demo provider deliberately rejects access codes sent as reusable bearer credentials. Access-code attempts are rate-limited.
-- The browser never receives MERIDIAN passwords, target cookies, CSRF tokens, approval tokens, or the opaque MERIDIAN session reference.
-- Run and evidence endpoints are owner-scoped. A different authenticated operator receives `404`, not another user's data.
-- Supervisor credentials cannot be selected by a teller identity. Supervisor-only capabilities require both console and target-session supervisor roles.
-- Chat is proposal-only. It cannot sign on, launch hidden work, confirm a checkpoint, or claim success.
-- Write submissions require an idempotency key. A key is bound to console subject, target session, capability, version, artifact digest, and input digest. Bindings are written to a fail-closed local ledger before work is queued, so normal run-history expiry or process restart cannot turn an old key into a new write.
-- Approval requests contain the exact challenge ID and reviewed state nonce. The server compares both to the currently paused checkpoint, rechecks the review summary immediately before commit, and issues a short-lived, one-use HMAC token bound to run, artifact, inputs, session, step, actor, role, state, and summary.
-- Sensitive review values are projected only after authorization. Success outputs are projected from declared output and table-column classifications; unknown fields and secret-shaped values are dropped or masked before JSON/SSE transport.
-- Run history retains only submitted contract field names, not raw invocation values or input digests. The dashboard renders a protected input envelope while the runner drops its manager-side value copy immediately after construction. Sign-on credentials are hydrated only inside runner construction; its evidence uses an opaque session-bound audit digest rather than a password-derived verifier.
-- Hidden transaction `_token` fields must exist, are used by native form submission, and are never copied into artifacts, APIs, logs, or screenshots.
-- The executor never selects a result by DOM index. Table-row controls use a reviewed key column and must resolve exactly once.
-- Final commits have no blind retry or recovery restart. If a write was attempted and its postcondition cannot prove the outcome, the run returns `EFFECT_UNKNOWN` instead of risking a duplicate transaction. A reversible write is still treated as externally uncertain until its postcondition succeeds.
-- A pre-commit `440` session expiry requires a fresh sign-on and restart. A `403` is a supervisor escalation. A declared pre-commit `503` may take one policy-checked `Continue` recovery and restart. `500` is a hard failure before commit; `440`, `500`, or a transient marker observed after the one final commit attempt becomes `EFFECT_UNKNOWN` and requires reconciliation.
-
-## Requirements
+### Prerequisites
 
 - Node.js `>=22.12 <27`
 - npm
-- Playwright Chromium
-- Access to the configured MERIDIAN origin
-- An Anthropic API key for natural-language routing, unless `CHAT_OFFLINE=1` explicitly selects deterministic development mode. Missing credentials otherwise fail startup.
+- Chromium installed through Playwright
+- Access to `https://web-sample.interface-hiring.com`
+- An Anthropic API key
 
-Install dependencies and the browser:
-
-```powershell
-npm ci
-npm run browser:install
-```
-
-The application reads process environment variables and does not automatically load `.env`. Copy values from [.env.example](.env.example) into your terminal or approved secret manager; never place real credentials in the repository.
-
-At minimum, configure:
+Install the exact dependency set and browser:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "your-anthropic-key"
-$env:MERIDIAN_CONSOLE_TELLER_ACCESS_CODE = "a-long-random-console-code"
-$env:MERIDIAN_TELLER_PASSWORD = "server-side-meridian-password"
-$env:APPROVAL_SIGNING_SECRET = "a-random-secret-of-at-least-32-bytes"
+npm.cmd ci
+npm.cmd run browser:install
 ```
 
-Supervisor access is independently configured with `MERIDIAN_CONSOLE_SUPERVISOR_ACCESS_CODE` and `MERIDIAN_SUPERVISOR_PASSWORD`. Use distinct random console codes. In HTTPS deployments set `CONSOLE_COOKIE_SECURE=1`; loopback HTTP development defaults to `0`.
-
-## Run the console
-
-For development, use two terminals:
+Create the local configuration file only if it does not already exist, then open that private file for editing:
 
 ```powershell
-npm run dev:api
+if (-not (Test-Path -LiteralPath ".\.env")) {
+  Copy-Item -LiteralPath ".\.env.example" -Destination ".\.env"
+}
+notepad.exe ".\.env"
 ```
+
+Do not paste a key into `.env.example`, chat, a command line, or a screenshot. In Notepad, replace only the value after `ANTHROPIC_API_KEY=` with the rotated key, save the file, and close it. Keep `.env` untracked. Fill at least these entries:
+
+```dotenv
+ANTHROPIC_API_KEY=<your Anthropic API key>
+
+MERIDIAN_CONSOLE_TELLER_ACCESS_CODE=<distinct random value, 16+ characters>
+MERIDIAN_CONSOLE_SUPERVISOR_ACCESS_CODE=<different random value, 16+ characters>
+
+# Public operators for the hosted sample only
+MERIDIAN_TELLER_OPERATOR=teller1
+MERIDIAN_TELLER_PASSWORD=password
+MERIDIAN_SUPERVISOR_OPERATOR=super1
+MERIDIAN_SUPERVISOR_PASSWORD=password
+
+APPROVAL_SIGNING_SECRET=base64:<at least 32 random bytes, base64 encoded>
+```
+
+The checked `.env.example` documents every supported setting. `ANTHROPIC_MODEL` and `ANTHROPIC_CHAT_MODEL` default to `claude-sonnet-5`; there is no provider selector. In a real deployment, source all credentials from an approved secret manager and set `CONSOLE_COOKIE_SECURE=1` behind HTTPS.
+
+Confirm that Git ignores the private file before continuing:
 
 ```powershell
-npm run dev:web
+git check-ignore .env
 ```
 
-Open `http://127.0.0.1:5173`. Vite proxies `/api` to `http://127.0.0.1:8787` by default; override only the development proxy with `VITE_API_ORIGIN`.
+The expected output is `.env`. Never add it with `git add -f`.
 
-For a production-style same-origin build:
-
-```powershell
-npm run build
-npm start
-```
-
-Open `http://127.0.0.1:8787`. The Fastify process serves the compiled React application and API from one origin.
-
-The operator flow is:
-
-1. Authenticate to the console with the role-specific access code.
-2. Establish a teller or supervisor MERIDIAN session. The server resolves its configured credentials; the UI never asks for them.
-3. Choose a capability or ask the Anthropic assistant for a proposal.
-4. Review typed business inputs and start the deterministic run.
-5. Follow queued, running, recovering, approval, and terminal states through SSE. Polling takes over if the stream disconnects.
-6. For a write, review every API-authorized summary value and approve the exact current challenge. A missing or masked review value disables approval.
-7. Use **Cancel safely** for queued or approval-paused work. Cancellation is owner-scoped, never substitutes for approval, and revokes a paused target session before the next operation.
-
-For the supplied sample data, a safe reviewer walkthrough is:
-
-1. Connect a teller session and run **Get member record and balances** for member `100234`. The terminal result should be `success`, with a contract-filtered share table and downloadable completion evidence.
-2. Run the same capability for `999999`. The natural HTTP-200 search miss should terminate as the deliberate `MEMBER_NOT_FOUND` business outcome, with exceptional-state evidence—not as a retryable system failure.
-3. Prepare a transfer to its review page. The run must stop at `awaiting_approval`; cancelling there demonstrates that chat, API retries, and the browser cannot cross the final post without the exact current human challenge. Approving will perform the real sample-system write, so do that only when the demonstration explicitly calls for it.
-4. With a teller console/session, **Place account hold** remains unavailable before any browser step. Re-authenticate and reconnect as supervisor to exercise that capability; the server never swaps credentials underneath a teller-owned run.
-
-The API contract is available at `/api/v1/openapi.json`. Mutating requests require `x-meridian-action: operator`; business writes also require `Idempotency-Key`. The console supplies both.
-
-## Anthropic behavior
-
-`ANTHROPIC_API_KEY` selects the official Anthropic Messages API router. `ANTHROPIC_CHAT_MODEL` is configurable and defaults to `claude-sonnet-5`. The intent-only call defaults to low effort through `ANTHROPIC_CHAT_EFFORT` and a 12-second provider deadline through `ANTHROPIC_CHAT_TIMEOUT_MS`; both are validated at startup. The browser allows a small transport grace beyond the server deadline. A caller disconnect, logout, or lifecycle teardown aborts the provider request, and one principal cannot leave two chat requests in flight.
-
-Tool use is strict and parallel tool calls are disabled. Canonical Zod schemas remain the local source of truth. A provider-specific compiler uses Anthropic's supported-schema transformation, deliberately lowers unsupported value constraints such as regular-expression patterns into bounded guidance, and rejects unsupported structure or excessive grammar complexity before a network call. This prevents provider regex incompatibilities without weakening local email or explicit-pattern validation. Every returned argument object is revalidated locally against the original Zod contract, and one request can propose at most one capability.
-
-Current messages containing credential material are rejected before a provider call. History and responses are redacted. Provider fallback occurs only for classified connectivity, timeout, rate-limit, `408`/`409`, or `5xx` outages; cancellation, ordinary provider `4xx` rejection, malformed output, unsafe arguments, and local validation failures do not silently fall back. Provider errors are mapped to fixed browser-safe codes and messages, while raw provider payloads, request bodies, tool-call IDs, and response IDs are neither returned nor logged. Set `CHAT_OFFLINE=1` to force deterministic local routing for tests.
-
-Anthropic does not replace the API transport. This separation lets another provider or local model implement the `ChatRouter` interface without changing the UI, catalog, run manager, or replay engine.
-
-## Runtime result model
-
-Runs are asynchronous and expose stable meanings:
-
-- `success`: the final checkpoint and every declared output were verified.
-- `business_outcome`: a legitimate negative result such as `MEMBER_NOT_FOUND`, validation rejection, insufficient funds, a held source share, or an existing hold.
-- `failure`: a technical or policy failure with a retryability and effect-certainty contract.
-- `escalation`: a new authenticated session or a different role is required.
-
-Natural search misses may arrive as HTTP `200` and are still business outcomes. Validation pages may use `400`. HTTP `403`, `404`, `440`, `500`, and `503` are classified from main-document responses only, never from unrelated subresources.
-
-## Verification
+The npm server, discovery, promotion, and scenario scripts use Node's `--env-file-if-exists=.env`, so they load `.env` automatically. Vite reads only its normal `VITE_*` client configuration. A missing Anthropic key or provider outage is reported explicitly; deterministic replay continues to require no model call.
 
 Run the complete local gate:
 
 ```powershell
-npm run check
+npm.cmd run check
 ```
 
-Its components are:
+Build and serve the API and compiled dashboard from one origin:
 
 ```powershell
-npm run typecheck
-npm test
-npm run build
+npm.cmd run build
+npm.cmd start
 ```
 
-The suite covers V1 regressions plus V2 artifact integrity, catalog immutability, member-page identity, row-scoped locators, main-document status tracking, typed tables/money, effect-aware retry, bounded `503` recovery, no-retry `403`/`440`/`500` handling, business outcomes, approval summary/state binding and expiry, session serialization, queue bounds, durable idempotency, Anthropic schema compatibility/tool validation/timeouts/fallback, API authentication/ownership, atomic evidence finalization, safe output projection, cancellation, and frontend lifecycle behavior.
+Open `http://127.0.0.1:8787`. The OpenAPI document is at `http://127.0.0.1:8787/api/v1/openapi.json`.
 
-A live read-only smoke test signs on and reads one synthetic member record with zero planner calls:
+For development, run the API and Vite in separate terminals:
 
 ```powershell
-$env:MERIDIAN_OPERATOR = "configured-operator"
-$env:MERIDIAN_PASSWORD = "configured-password"
-npm run smoke:meridian:read
+npm.cmd run dev:api
 ```
-
-The same read-only script can verify the natural exceptional path without changing target state:
 
 ```powershell
-$env:MERIDIAN_MEMBER_NUMBER = "999999"
-$env:MERIDIAN_EXPECTED_STATUS = "business_outcome"
-npm run smoke:meridian:read
+npm.cmd run dev:web
 ```
 
-The read-only smoke was exercised successfully against the supplied target. Final transfer, share-open, member-update, and hold commits have intentionally not been executed against the shared live environment. Their reviewed forms, hidden token, role behavior, routes, HTTP outcomes, and final controls were characterized without posting the irreversible action.
+Then open `http://127.0.0.1:5173`. `VITE_API_ORIGIN` controls only this development connection.
 
-This workspace did not have `ANTHROPIC_API_KEY` configured while the adaptation was built. The MERIDIAN V2 artifacts therefore truthfully declare `provenance.source: "authored"`; they were compiled from guarded live reconnaissance and local review and do not pretend to be a genuine Anthropic discovery run. The retained V1 bundle demonstrates the existing genuine discovery loop, and the V2 artifact contract already carries discovery run/provider/model provenance for promotion once an approved Anthropic key is supplied. A production promotion workflow should run that provider-backed discovery/review job, compare the canonical draft, execute read-only canaries, and only then publish a new approved digest.
+Application startup always loads artifacts and lineage from separate roots. The defaults are:
 
-## Evidence and privacy
+```dotenv
+CAPABILITY_ARTIFACT_ROOT=catalog/meridian-v2/artifacts
+CAPABILITY_LINEAGE_ROOT=catalog/meridian-v2/lineage
+```
 
-Each live run creates a redacted evidence directory under `EVIDENCE_ROOT`. Events are append-only JSONL and are flushed and hashed before finalization. Terminal evidence may include a masked screenshot and sanitized DOM. The manifest is written atomically as the final completion marker and binds capability, artifact digest, input digest, terminal status, and incident codes while recording that planner calls were forbidden during replay. A run is not published terminal until its recorder and manifest have closed; temporary or hidden files are never listed as evidence. The dashboard stages downloads until the server reports a finalized manifest and distinguishes pending, failed, expired, and unavailable evidence instead of presenting a partial bundle.
+Startup fails closed if the roots are the same, any of the eight required `2.0.0` capabilities is absent, an artifact is not approved discovery provenance, lineage stages or run IDs are invalid, or the approved digest differs from the canonical artifact digest.
 
-Evidence endpoints require the owning console identity and safe path resolution; symlinks, traversal, hidden files, and atomic-write temporaries are rejected. Completed runs and their authorization metadata are retained for the configured run-retention window (eight hours by default); owner-scoped evidence is removed when its run is evicted. The local store is an adapter, not a compliance archive. A deployment should replace it with encrypted tenant-scoped object storage, retention and legal-hold policy, signed audit metadata, and institution-specific access review.
+## Use the console
 
-The local `evidence/ceo-rehearsal/` directory is intentionally ignored: it contains pre-hardening captures whose manifests predate the footer/member-hint masks. Do not present or publish it. Generate a fresh rehearsal bundle with this hardened build.
+Authenticate with the configured teller or supervisor console access code. This identity is separate from the target operator profile and is exchanged for an opaque `HttpOnly; SameSite=Strict` cookie.
 
-## Retained V1 harness
+### Assistant path: request to execution
 
-The original synthetic application, CLI discovery flow, model adapters, human-control coordinator, and checked evidence remain usable for regression and design comparison:
+Open **Assistant** and send a business request such as:
+
+```text
+Show the balances for member 100234.
+```
+
+The actual behavior is automatic and deliberately bounded:
+
+1. `POST /api/v1/chat` asks Anthropic for a reply, one exact approved capability proposal, or an ordered sequence of at most three approved capabilities. The chat endpoint itself does not create a run.
+2. The authenticated React client validates the returned version, artifact digest, target-profile digest, typed arguments, and sequence bindings.
+3. The same **Send** action authorizes only that exact proposal or bounded sequence. The client immediately submits it through `POST /api/v1/runs`.
+4. If no target session is active, the client first starts `session.sign_on`, waits until the owned session is independently verified, rechecks role/branch binding, and only then starts the business run.
+5. Sequence steps execute in order and stop on any non-success. Zero matches stop; more than one row pauses for an authenticated selection instead of guessing.
+6. If a chat-authorized write reaches approval, the client may submit that exact challenge once only after rechecking the run, capability/version/digests, original proposal inputs, sequence lineage, complete display-safe review summary, expiry, session, and supervisor requirement. An uncertain response is never retried automatically.
+
+Credentials in chat are rejected and cleared. Sign-on is not exposed as a model tool. A teller identity cannot establish or elevate to a supervisor target session.
+
+### Workspace path: explicit operator controls
+
+The **Workspace** exposes the same catalog as typed forms. Select a capability, enter its business inputs, choose **Start run**, follow the live timeline, inspect the exact review summary, and use **Approve and continue** or **Cancel safely**. This path preserves a separate explicit approval click for writes.
+
+The authenticated **History** view separates two real record types. **Discovery** records are privacy-safe projections of validated published artifacts and lineage: they show the declared input contract while explicitly withholding invocation values, the approved typed output contract and lifecycle digests, the discovery → draft → review → canary → approval promotion timeline, and persisted evidence references. **Replay** records are identity-scoped operational history—owned runs plus an unexpired, subject-bound delegated handoff run—with status, events, typed results, approvals, interventions, reconciliation, and finalized owner evidence detail.
+
+Run updates use replayable SSE events with `Last-Event-ID`, heartbeats, and bounded polling after a disconnected stream.
+
+## API contract
+
+All routes except health, OpenAPI, and login require the console session. State-changing requests require `x-meridian-action: operator`; write submission also requires `Idempotency-Key`. Run creation returns `202 Accepted` and a structured snapshot.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/health` | Service status and active Anthropic provider name. |
+| `GET /api/v1/openapi.json` | Machine-readable API contract. |
+| `POST /api/v1/auth/login`, `GET /api/v1/auth/me`, `POST /api/v1/auth/logout` | Console identity lifecycle. |
+| `GET /api/v1/capabilities` | Approved typed catalog with digest bindings. |
+| `GET /api/v1/capabilities/{id}/{version}` | Exact approved capability version. |
+| `GET /api/v1/discovery-runs` | Published discovery history projected from validated artifact/lineage pairs. |
+| `GET /api/v1/discovery-runs/{id}` | One privacy-safe discovery record with typed contracts, lifecycle digests, timeline, and evidence references. |
+| `POST /api/v1/sessions` | Queue server-owned MERIDIAN sign-on. |
+| `POST /api/v1/runs` | Invoke a capability by ID/version, typed inputs, target session, and digest binding. |
+| `GET /api/v1/runs`, `GET /api/v1/runs/{runId}` | Identity-scoped owned/active-delegated history and structured result. |
+| `GET /api/v1/runs/{runId}/events` | Replayable SSE timeline. |
+| `POST /api/v1/runs/{runId}/approve` | Submit the exact current challenge. |
+| `POST /api/v1/runs/{runId}/cancel` | Cancel queued or safely paused work. |
+| `POST`, `GET /api/v1/runs/{runId}/reconciliation` | Start/read a bound read-only reconciliation. |
+| `POST /api/v1/runs/{runId}/handoff/invitations` | Create a short, one-time delegation invitation. |
+| `POST /api/v1/handoff/invitations/redeem` | Redeem an invitation under the required identity. |
+| `POST /api/v1/runs/{runId}/handoff/{take,action,resume}` | Lease control, perform the server-selected action, revalidate, and resume. |
+| `GET /api/v1/runs/{runId}/evidence` | List finalized evidence. A child path downloads one safe file. |
+| `POST /api/v1/chat` | Return an Anthropic reply/proposal/sequence for client execution. |
+
+Raw MERIDIAN selectors, session references, cookies, credentials, hidden `_token` values, and approval material are not API inputs.
+
+## V2 discovery, review, canary, approval, and publication
+
+The lifecycle is part of the production catalog path, not a side utility:
+
+| Stage | What is allowed to own |
+| --- | --- |
+| Privacy-safe `DiscoveryTraceV2` | Observed targets, semantic table/label-value/row-control relationships, action order, derived step postconditions, and a safe checkpoint candidate; never raw invocation values, visible prose, screenshots, credentials, or session references. |
+| Draft compilation | The trace supplies executable structure. One of the eight explicit MERIDIAN recipes supplies reviewed field types, policy, runtime-state/effect annotations, approval rules, and table-column semantics. |
+| Review | A reviewer integrates the checked target contract with the discovered safe prefix and binds its canonical digest. |
+| Read-only canary | Replays the reviewed safe prefix in the exact authenticated target context and stops before the first persistent write. |
+| Approval | Requires successful matching canary lineage, model discovery provenance, matching run IDs/digests, and no raw-value leakage. |
+| Publish | Installs artifact and lineage immutably into separate roots; the catalog loader revalidates the binding. |
+
+Promotion rejects test-double provenance, failed or mismatched canaries, skipped stages, changed canonical digests, and raw discovery-input leakage. For non-sign-on recipes, discovery and canary first resolve the exact approved `session.sign_on@2.0.0` from the configured artifact and lineage roots, then retain that authenticated browser context. Credentials may not be supplied as CLI inputs.
+
+### Runnable lifecycle example
+
+The following records and promotes the balances capability against the hosted target. Values passed with `--input` are repeated at each stage so leakage checks remain bound to the same invocation.
 
 ```powershell
-npm run demo
-npm run discover -- --planner offline --target "http://127.0.0.1:4317/?tenant=summit" --inputs "examples/inputs/discovery.json" --artifact "evidence/generated/offline-artifact.json" --evidence "evidence/generated/offline-discovery"
-npm run replay -- --artifact "evidence/generated/offline-artifact.json" --target "http://127.0.0.1:4317/?tenant=harbor" --inputs "examples/inputs/replay.json" --evidence "evidence/generated/offline-replay"
+$targetOrigin = "https://web-sample.interface-hiring.com"
+$promotion = Join-Path $PWD "evidence\generated\promotion\member-balances"
+New-Item -ItemType Directory -Force -Path $promotion | Out-Null
+
+$discovery = (npm.cmd --silent run discover -- `
+  --capability "member.get_record_and_balances" `
+  --target "$targetOrigin/menu" `
+  --goal "From the authenticated menu, look up member {{member_number}}, return member details and shares, and finish on the member record." `
+  --role "teller" `
+  --input "member_number=100234" | Out-String) | ConvertFrom-Json
+
+$draft = $discovery.artifact
+$draftLineage = $discovery.lineage
+$reviewed = Join-Path $promotion "reviewed.json"
+$reviewedLineage = Join-Path $promotion "reviewed.lineage.json"
+$attestation = Join-Path $promotion "canary.json"
+$canaryLineage = Join-Path $promotion "canary.lineage.json"
+$approved = Join-Path $promotion "approved.json"
+$approvedLineage = Join-Path $promotion "approved.lineage.json"
+
+npm.cmd run review -- `
+  --lineage $draftLineage --draft $draft --reviewer "reviewer@example" `
+  --out-artifact $reviewed --out-lineage $reviewedLineage `
+  --input "member_number=100234"
+
+npm.cmd run canary -- `
+  --lineage $reviewedLineage --artifact $reviewed `
+  --target "$targetOrigin/menu" --role "teller" `
+  --out-attestation $attestation --out-lineage $canaryLineage `
+  --input "member_number=100234"
+
+npm.cmd run approve -- `
+  --lineage $canaryLineage --artifact $reviewed --approver "approver@example" `
+  --out-artifact $approved --out-lineage $approvedLineage `
+  --input "member_number=100234"
+
+$stagingArtifacts = Join-Path $promotion "catalog\artifacts"
+$stagingLineage = Join-Path $promotion "catalog\lineage"
+npm.cmd run publish -- `
+  --artifact $approved --lineage $approvedLineage `
+  --catalog-dir $stagingArtifacts --lineage-dir $stagingLineage
 ```
 
-The offline planner is a test double, not evidence of genuine LLM discovery. The checked V1 evidence bundle remains unchanged unless the explicit evidence replacement command is used.
+In a fresh catalog, promote `session.sign_on` first. Its live discovery command is:
 
-The retained V1 operator handoff remains a same-live-session regression harness: automation releases exclusive control, a fragment-held console token authorizes the local operator surface, the human satisfies the pending postcondition, and deterministic execution resumes only after observing it. Raw session IDs and handoff tokens are absent from evidence; a one-way session correlation digest is retained for audit continuity. Generic V2 console handoff is not yet exposed; V2 role escalation instead requires a fresh correctly authorized session and a new run.
+```powershell
+npm.cmd run discover -- `
+  --capability "session.sign_on" `
+  --target "https://web-sample.interface-hiring.com/signon" `
+  --goal "Sign on with the configured role profile and finish on the menu." `
+  --role "teller"
+```
 
-The project is available under the [MIT License](LICENSE).
+Do not pass operator or password inputs. Apply the same review/canary/approve/publish stages without `--input`, publish sign-on into the new roots, and point `CAPABILITY_ARTIFACT_ROOT` and `CAPABILITY_LINEAGE_ROOT` at those roots before discovering the other seven capabilities. A runtime catalog becomes usable only after all eight exact IDs are published; publishing this one example alone is intentionally insufficient.
+
+The command surface is discoverable with:
+
+```powershell
+npm.cmd run discover -- --help
+npm.cmd run review -- --help
+npm.cmd run canary -- --help
+npm.cmd run approve -- --help
+npm.cmd run publish -- --help
+```
+
+## Exact live acceptance scenarios
+
+The guarded scenario runner refuses localhost and arbitrary origins, uses the same approved catalog and model-free replay stack as the application, and requires explicit enablement plus both role profiles. These public sample credentials are suitable only for the hosted exercise:
+
+```dotenv
+MERIDIAN_DEMO_SCENARIOS=1
+MERIDIAN_TELLER_OPERATOR=teller1
+MERIDIAN_TELLER_PASSWORD=password
+MERIDIAN_SUPERVISOR_OPERATOR=super1
+MERIDIAN_SUPERVISOR_PASSWORD=password
+```
+
+Run any scenario independently:
+
+```powershell
+npm.cmd run demo:scenario -- balance-success
+npm.cmd run demo:scenario -- member-not-found
+npm.cmd run demo:scenario -- maintenance-recovery
+npm.cmd run demo:scenario -- session-timeout
+npm.cmd run demo:scenario -- application-error
+npm.cmd run demo:scenario -- supervisor-required
+npm.cmd run demo:scenario -- transfer-success
+npm.cmd run demo:scenario -- share-open-success
+npm.cmd run demo:scenario -- member-update-success
+npm.cmd run demo:scenario -- hold-supervisor-handoff
+npm.cmd run demo:scenario -- validation-rejected
+```
+
+| Scenario | Verified acceptance behavior |
+| --- | --- |
+| `balance-success` | Returns a non-empty typed share/balance set. |
+| `member-not-found` | Treats the natural HTTP-200 search miss as `MEMBER_NOT_FOUND`, not a crash. |
+| `maintenance-recovery` | Performs exactly one bounded recovery and then succeeds. |
+| `session-timeout` | Pauses for a same-session restore intervention. |
+| `application-error` | Classifies a pre-write `500` as a hard application failure. |
+| `supervisor-required` | Pauses for a same-session supervisor intervention. |
+| `transfer-success` | Reviews and posts one real `$1.00` transfer once, verifies receipt deltas, then reads back. |
+| `share-open-success` | Reviews and opens one real share with a `$5.00` deposit, then reads back. |
+| `member-update-success` | Posts one reviewed update using the current contact values, then verifies no unintended change. |
+| `hold-supervisor-handoff` | Opens a share, starts the hold as teller, completes the same-live-session supervisor handoff, commits, and reads back. |
+| `validation-rejected` | Classifies target validation as a non-applied business outcome. |
+
+The four write scenarios mutate the public hosted sample. Its in-memory state resets when the host redeploys; do not assume prior scenario state persists.
+
+Each invocation writes a unique bundle under `evidence/v2` by default; set `MERIDIAN_DEMO_EVIDENCE_ROOT` to choose another root. The script prints `status: "verified"` only after scenario assertions pass, every manifest-listed byte is re-hashed, unlisted bundle files are rejected, configured sensitive values are absent, and `plannerCallsAllowed` is false. The submitted `evidence/v2` directory contains finalized bundles for all eleven scenarios.
+
+## Reliability, escalation, and reconciliation
+
+The MERIDIAN adapter uses exact form names, roles, labels, label/value relationships, exact table headers, and row-keyed controls. It never selects a repeated `Select` link by ordinal position. The native hidden `_token` must exist for a transaction post but is never copied into an artifact, request, log, or screenshot. Route policy anchors the exact origin and allowed path/query space, and HTTP classification uses the main document rather than assets or frames.
+
+| Target signal | Deliberate result |
+| --- | --- |
+| Natural search miss at HTTP 200 | `MEMBER_NOT_FOUND` business outcome. |
+| Validation HTTP 400 | `VALIDATION_REJECTED` non-applied business outcome. |
+| Record HTTP 404 | Record-not-found business outcome. |
+| Permission HTTP 403 | `SUPERVISOR_REQUIRED`; pause for same-session handoff before a commit attempt. |
+| Session timeout HTTP 440 | Restore-session intervention before commit; `EFFECT_UNKNOWN` after a commit attempt. |
+| Maintenance HTTP 503 | One declared recovery before commit; `EFFECT_UNKNOWN` after a commit attempt. |
+| Server HTTP 500 | Hard application error before commit; `EFFECT_UNKNOWN` after a commit attempt. |
+| Ambiguous final response | `EFFECT_UNKNOWN`, no blind retry, reconciliation required. |
+
+A human intervention keeps the original live target session. The owner takes a `restore_session` intervention directly. When `authenticate_supervisor` declares a required role, the owner can create a one-time invitation valid for at most 120 seconds; the authenticated supervisor redeems it and leases that exact run. In either path, the human performs only the server-selected action and resumes only after artifact-declared revalidation. Automation and human control cannot own the session simultaneously.
+
+For an effect-uncertain transfer, share open, member update, or hold, reconciliation launches an idempotent read-only `member.get_record_and_balances` run. It compares retained pre-commit markers with current state and reports `applied`, `not_applied`, or `still_unknown`. This evidence never authorizes a second write.
+
+## Approval, idempotency, and evidence
+
+- A write pauses before its declared persistent effect. The challenge carries an unpredictable ID, exact run/step, display-safe summary, state nonce, requirement, and expiry.
+- The server issues a one-use HMAC approval bound to actor/role, run, session, artifact digest, normalized input digest, step, summary, state, and expiry. The model cannot create or consume it.
+- A write idempotency key is bound to owner, session, capability/version, artifact and target-profile digests, and normalized inputs. The file ledger records the binding before queueing.
+- A final commit is attempted once. Read/draft work can retry only where the approved artifact declares it.
+- Screenshots are masked before storage. DOM evidence is sanitized into inert content; JSON/text are redacted. The append-only event stream is closed and hashed before the manifest is written last.
+- Evidence API reads are owner-scoped, paths must remain inside the bundle, and DOM is downloaded as inert text rather than rendered as active HTML.
+
+The built-in static console identity and file idempotency ledger are appropriate for a loopback, single-process demonstration. Production hardening should replace them with enterprise identity/step-up, a transactional shared ledger and run store, KMS/HSM approval signing, encrypted object evidence, registry signatures, tenant policy, and centralized audit/observability.
+
+## Verification and deliverables
+
+Use these local gates:
+
+```powershell
+npm.cmd run typecheck
+npm.cmd run test
+npm.cmd run build
+# Equivalent aggregate:
+npm.cmd run check
+```
+
+`npm.cmd run test:e2e` exercises local Playwright fixtures. It verifies adapter and orchestration behavior, not live-target effects. The eleven guarded `demo:scenario` commands are the live acceptance path; their finalized bundles are the external evidence.
+
+Submission deliverables are:
+
+- source for the V2 domain, discovery/promotion lifecycle, replay runtime, MERIDIAN adapter, API, chat, dashboard, handoff, reconciliation, and evidence controls;
+- eight immutable published artifacts under `catalog/meridian-v2/artifacts` and matching approved lineage under `catalog/meridian-v2/lineage`;
+- the OpenAPI contract at `/api/v1/openapi.json`;
+- finalized real-scenario evidence under `evidence/v2` for success, business outcome, recovery, hard failure, same-session escalation, and four writes;
+- a privacy-safe compiled-dashboard proof at [`evidence/ui/live-anthropic-auto-run.png`](evidence/ui/live-anthropic-auto-run.png), captured after console authentication, Anthropic routing, automatic target sign-on, deterministic execution, and verified completion;
+- a compiled discovery-history proof at [`evidence/ui/discovery-history.png`](evidence/ui/discovery-history.png), showing all eight published Anthropic discovery records, withheld invocation values, and the typed output contract; and
+- the concise adaptation report in [REPORT.md](REPORT.md).
+
+No screen recording is included. The compiled-dashboard proofs plus the reproducible scenario commands, structured run results, append-only events, masked screenshots, sanitized DOM, and hash-bound manifests are the submitted demonstration record.

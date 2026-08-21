@@ -1,0 +1,19 @@
+{
+  "scenario": "supervisor-required",
+  "status": "verified",
+  "observation": {
+    "status": "awaiting_human",
+    "code": "SUPERVISOR_REQUIRED",
+    "capabilityId": "member.get_record_and_balances",
+    "incidentCodes": [
+      "SUPERVISOR_REQUIRED"
+    ]
+  },
+  "assertion": {
+    "injectedFault": true,
+    "sameLiveSession": true,
+    "action": "authenticate_supervisor",
+    "requiredRole": "supervisor"
+  },
+  "plannerCallsAllowed": false
+}

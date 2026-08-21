@@ -1,0 +1,25 @@
+{
+  "scenario": "member-update-success",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "member.update_information",
+    "outputKeys": [
+      "address",
+      "address_before",
+      "email",
+      "email_before",
+      "phone",
+      "phone_before"
+    ],
+    "incidentCodes": []
+  },
+  "assertion": {
+    "noNetContactChange": true,
+    "exactApproval": true,
+    "oneCommitAttempt": true,
+    "beforeAfterVerified": true,
+    "readAfterWriteVerified": true
+  },
+  "plannerCallsAllowed": false
+}

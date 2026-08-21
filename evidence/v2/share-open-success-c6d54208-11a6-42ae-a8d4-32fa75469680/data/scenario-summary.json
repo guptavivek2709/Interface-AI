@@ -1,0 +1,24 @@
+{
+  "scenario": "share-open-success",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "share.open",
+    "outputKeys": [
+      "confirmation",
+      "new_share_id",
+      "opening_balance",
+      "share_type",
+      "shares_before"
+    ],
+    "incidentCodes": []
+  },
+  "assertion": {
+    "openingBalanceMinorUnits": 500,
+    "exactApproval": true,
+    "oneCommitAttempt": true,
+    "receiptVerified": true,
+    "readAfterWriteVerified": true
+  },
+  "plannerCallsAllowed": false
+}

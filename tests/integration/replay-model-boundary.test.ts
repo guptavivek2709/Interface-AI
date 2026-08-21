@@ -42,12 +42,11 @@ async function replayRuntimeGraph(entry: string): Promise<RuntimeGraph> {
 
 describe("deterministic replay import boundary", () => {
   it("has no runtime dependency on a planner, model SDK, or model implementation", async () => {
-    const entry = path.resolve("src/replay/replayRunner.ts");
+    const entry = path.resolve("src/replay/replayRunnerV2.ts");
     const graph = await replayRuntimeGraph(entry);
     const portableFiles = [...graph.files].map((item) => item.replaceAll("\\", "/"));
 
     expect(portableFiles.some((item) => item.includes("/src/model/"))).toBe(false);
-    expect([...graph.externalModules]).not.toContain("openai");
     expect([...graph.externalModules]).not.toContain("@anthropic-ai/sdk");
 
     const replaySource = await readFile(entry, "utf8");

@@ -29,6 +29,18 @@ export interface CapabilityField {
   classification: string;
 }
 
+export interface CapabilityLineage {
+  lineageId: string;
+  discoveryRunId: string;
+  provider: "anthropic-messages";
+  model: string;
+  traceDigest: string;
+  draftDigest: string;
+  reviewedDigest: string;
+  approvedDigest: string;
+  canaryRunId: string;
+}
+
 export interface Capability {
   id: string;
   name: string;
@@ -41,8 +53,74 @@ export interface Capability {
   inputs: CapabilityField[];
   outputs: CapabilityField[];
   digest: string;
+  /** Immutable digest of the exact target profile reviewed with this catalog entry. */
+  targetProfileDigest: string;
+  /** Digest-bound discovery, review, canary, and publication chain. */
+  lineage?: CapabilityLineage;
   /** False when the wire contract was incomplete or structurally unsupported. */
   contractValid: boolean;
+  /** True only for a reviewed same-live-session supervisor escalation path. */
+  supportsSupervisorHandoff: boolean;
+}
+
+export type DiscoveryRunStatus = "draft" | "reviewed" | "canary_passed" | "approved";
+
+export interface DiscoveryRunInput extends CapabilityField {
+  /** Discovery invocation values are deliberately never persisted or returned. */
+  valueStatus: "withheld";
+}
+
+export interface DiscoveryRunTimelineEvent {
+  type: "draft_created" | "reviewed" | "canary_passed" | "approved";
+  at: string;
+  actor: string;
+  artifactDigest: string;
+  parentArtifactDigest?: string;
+  traceDigest?: string;
+  reviewDiffDigest?: string;
+  changedPathCount?: number;
+  canaryRunId?: string;
+  evidenceDigest?: string;
+}
+
+export interface DiscoveryRunOutput {
+  traceDigest: string;
+  draftDigest: string;
+  reviewedDigest: string;
+  approvedDigest: string;
+  canaryRunId: string;
+}
+
+export interface DiscoveryEvidenceReference {
+  kind: "artifact" | "lineage" | "canary";
+  label: string;
+  sha256: string;
+  /** Authenticated same-origin projection of the validated persisted record. */
+  href?: string;
+}
+
+/**
+ * Read-only projection of one genuine model discovery and its external
+ * promotion lineage. It is not a replay record or a fabricated run.
+ */
+export interface DiscoveryRunRecord {
+  kind: "discovery";
+  id: string;
+  discoveryRunId: string;
+  capabilityId: string;
+  capabilityVersion: string;
+  capabilityName: string;
+  goal: string;
+  createdAt: string;
+  completedAt: string;
+  status: DiscoveryRunStatus;
+  provider: "anthropic-messages";
+  model: string;
+  inputs: DiscoveryRunInput[];
+  outputContract: CapabilityField[];
+  output: DiscoveryRunOutput;
+  timeline: DiscoveryRunTimelineEvent[];
+  evidence: DiscoveryEvidenceReference[];
 }
 
 export type RunPhase =
@@ -70,7 +148,7 @@ export interface RunJournalEntry {
 
 export interface RunIncident {
   code: string;
-  category: "recoverable" | "failure" | "escalation";
+  category: "recoverable" | "failure" | "escalation" | "intervention";
   message: string;
   stepId?: string;
   occurredAt: string;
@@ -94,6 +172,48 @@ export interface ApprovalChallenge {
   createdAt: string;
   expiresAt: string;
   summary: ApprovalSummaryItem[];
+  /** Server-derived authority for this principal and retained target session. */
+  authorized: boolean;
+}
+
+export interface HumanIntervention {
+  interventionId: string;
+  runId: string;
+  stepId: string;
+  reasonCode: string;
+  action: "restore_session" | "authenticate_supervisor";
+  state: "awaiting_human" | "human_active" | "action_completed" | "revalidating";
+  createdAt: string;
+  expiresAt: string;
+  sameLiveSession: true;
+  requiredRole?: string;
+}
+
+export type RunOrchestration =
+  | {
+      kind: "chat_sequence";
+      sequenceId: string;
+      stepId: string;
+      stepIndex: number;
+      stepCount: number;
+      parentRunId?: string;
+    }
+  | {
+      kind: "reconciliation";
+      sourceRunId: string;
+    };
+
+export interface ReconciliationDecision {
+  classification: "applied" | "not_applied" | "still_unknown";
+  reason: string;
+  checkedFields: string[];
+}
+
+export interface ReconciliationRecord {
+  sourceRunId: string;
+  runId?: string;
+  status: "not_started" | "running" | "running_or_complete" | "complete";
+  decision?: ReconciliationDecision;
 }
 
 export interface RunRecord {
@@ -101,6 +221,7 @@ export interface RunRecord {
   capabilityId: string;
   capabilityVersion: string;
   artifactDigest?: string;
+  targetProfileDigest?: string;
   revision?: number;
   lastEventId?: number;
   phase: RunPhase;
@@ -119,6 +240,8 @@ export interface RunRecord {
   journal: RunJournalEntry[];
   incidents: RunIncident[];
   challenge?: ApprovalChallenge;
+  intervention?: HumanIntervention;
+  orchestration?: RunOrchestration;
 }
 
 export interface LiveEvent {
@@ -130,6 +253,65 @@ export interface LiveEvent {
   tone: "neutral" | "positive" | "warning" | "critical";
 }
 
+export interface ChatSequenceBinding {
+  sourceStepId: string;
+  sourceCollectionPath: string[];
+  valuePath: string[];
+  targetInput: string;
+  selection: "exactly_one";
+  onZero: "stop_no_match";
+  onMany: "pause_for_authenticated_selection";
+}
+
+export interface ChatSequenceStep {
+  stepId: string;
+  toolName: string;
+  capabilityId: string;
+  capabilityVersion: string;
+  literalArguments: Record<string, JsonValue>;
+  bindings: ChatSequenceBinding[];
+  artifactDigest: string;
+  targetProfileDigest: string;
+}
+
+export interface ChatSequencePlan {
+  kind: "sequence";
+  sequenceId: string;
+  steps: ChatSequenceStep[];
+  failurePolicy: "stop_on_non_success";
+  expiresAt: string;
+}
+
+export interface ChatApprovalExecution {
+  challengeId: string;
+  state: "submitting" | "accepted" | "unconfirmed" | "rejected";
+  code?: string;
+  message?: string;
+}
+
+export interface ChatSequenceStepExecution {
+  stepId: string;
+  state: "pending" | "starting" | "submitted" | "success" | "selection_required" | "stopped" | "unconfirmed" | "rejected";
+  runId?: string;
+  code?: string;
+  message?: string;
+  approval?: ChatApprovalExecution;
+}
+
+export interface ChatSequenceExecution {
+  state: "connecting" | "running" | "selection_required" | "completed" | "stopped" | "unconfirmed" | "rejected";
+  currentStepIndex: number;
+  steps: ChatSequenceStepExecution[];
+  selection?: {
+    stepId: string;
+    sourceStepId: string;
+    sourceCollectionPath: string[];
+    count: number;
+  };
+  code?: string;
+  message?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -139,12 +321,25 @@ export interface ChatMessage {
     capabilityId: string;
     capabilityVersion: string;
     artifactDigest: string;
+    targetProfileDigest: string;
     arguments: Record<string, JsonValue>;
   };
+  sequence?: ChatSequencePlan;
+  /**
+   * Browser-owned execution state for a proposal launched from an authenticated
+   * Send action. This is never sent back to the model as conversation history.
+   */
+  execution?: {
+    state: "connecting" | "starting" | "submitted" | "unconfirmed" | "rejected";
+    runId?: string;
+    code?: string;
+    message?: string;
+    approval?: ChatApprovalExecution;
+  };
+  sequenceExecution?: ChatSequenceExecution;
   routing?: {
     provider: string;
     model?: string;
-    fallbackFrom?: string;
   };
 }
 

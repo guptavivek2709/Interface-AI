@@ -30,6 +30,7 @@ const MAX_JSON_DEPTH = 32;
 export interface PreparedChatTool {
   readonly definition: ChatToolDefinition;
   readonly jsonSchema: JsonObject;
+  readonly outputJsonSchema?: JsonObject;
 }
 
 export interface PreparedChatRouteRequest {
@@ -170,6 +171,26 @@ function assertSchemaObjectRules(schema: unknown, path: string): void {
   }
 }
 
+function compileObjectSchema(schema: z.ZodType, toolName: string, label: "input" | "output"): JsonObject {
+  let generated: unknown;
+  try {
+    generated = z.toJSONSchema(schema);
+  } catch (error) {
+    throw routingError(
+      "INVALID_TOOL_DEFINITION",
+      `Tool ${JSON.stringify(toolName)} ${label} cannot be represented as JSON Schema`,
+      error,
+    );
+  }
+  const jsonSchema = jsonObjectClone(generated, "INVALID_TOOL_DEFINITION");
+  delete jsonSchema["$schema"];
+  if (jsonSchema["type"] !== "object") {
+    throw routingError("INVALID_TOOL_DEFINITION", `Tool ${label} schema root must be an object`);
+  }
+  assertSchemaObjectRules(jsonSchema, `$${label}`);
+  return jsonSchema;
+}
+
 function compileTool(tool: ChatToolDefinition): PreparedChatTool {
   if (!isRecord(tool)) {
     throw routingError("INVALID_TOOL_DEFINITION", "Tool definition must be an object");
@@ -203,24 +224,15 @@ function compileTool(tool: ChatToolDefinition): PreparedChatTool {
   if (!(tool.inputSchema instanceof z.ZodType)) {
     throw routingError("INVALID_TOOL_DEFINITION", "Tool inputSchema must be a Zod schema");
   }
+  if (tool.outputSchema !== undefined && !(tool.outputSchema instanceof z.ZodType)) {
+    throw routingError("INVALID_TOOL_DEFINITION", "Tool outputSchema must be a Zod schema");
+  }
 
-  let generated: unknown;
-  try {
-    generated = z.toJSONSchema(tool.inputSchema);
-  } catch (error) {
-    throw routingError(
-      "INVALID_TOOL_DEFINITION",
-      `Tool ${JSON.stringify(tool.name)} cannot be represented as JSON Schema`,
-      error,
-    );
-  }
-  const jsonSchema = jsonObjectClone(generated, "INVALID_TOOL_DEFINITION");
-  delete jsonSchema["$schema"];
-  if (jsonSchema["type"] !== "object") {
-    throw routingError("INVALID_TOOL_DEFINITION", "Tool input schema root must be an object");
-  }
-  assertSchemaObjectRules(jsonSchema, "$input");
-  return { definition: tool, jsonSchema };
+  const jsonSchema = compileObjectSchema(tool.inputSchema, tool.name, "input");
+  const outputJsonSchema = tool.outputSchema
+    ? compileObjectSchema(tool.outputSchema, tool.name, "output")
+    : undefined;
+  return { definition: tool, jsonSchema, ...(outputJsonSchema ? { outputJsonSchema } : {}) };
 }
 
 export function prepareChatTools(tools: readonly ChatToolDefinition[]): readonly PreparedChatTool[] {
@@ -381,6 +393,68 @@ export function validateToolInput(
   }
   assertInputKeysPreserved(input, parsed.data);
   const normalized = jsonObjectClone(parsed.data, "INVALID_TOOL_INPUT");
+  assertNoSecretValues(normalized, secrets);
+  return normalized;
+}
+
+/**
+ * Validates the literal portion of a future sequence step. Required top-level
+ * inputs may be omitted only when an explicit prior-step binding supplies them.
+ * The fully resolved object must still pass validateToolInput immediately before
+ * the run API is called.
+ */
+export function validatePartialToolInput(
+  tool: PreparedChatTool,
+  input: unknown,
+  boundInputs: readonly string[],
+  secrets: readonly string[] = [],
+): JsonObject {
+  if (!isRecord(input)) {
+    throw routingError("INVALID_TOOL_INPUT", "Sequence literal arguments must be an object");
+  }
+  if (!Array.isArray(boundInputs) || new Set(boundInputs).size !== boundInputs.length) {
+    throw routingError("INVALID_TOOL_INPUT", "Sequence bindings must target unique inputs");
+  }
+  const properties = tool.jsonSchema["properties"];
+  if (!isRecord(properties) || !(tool.definition.inputSchema instanceof z.ZodObject)) {
+    throw routingError("INVALID_TOOL_DEFINITION", "Sequence tools require a closed object input schema");
+  }
+  for (const target of boundInputs) {
+    if (
+      typeof target !== "string" ||
+      BLOCKED_OBJECT_KEYS.has(target) ||
+      SECRET_FIELD_PATTERN.test(target) ||
+      !(target in properties)
+    ) {
+      throw routingError("INVALID_TOOL_INPUT", "Sequence binding targets an unknown input");
+    }
+    if (Object.hasOwn(input, target)) {
+      throw routingError("INVALID_TOOL_INPUT", "A sequence input cannot be both literal and bound");
+    }
+  }
+  const required = Array.isArray(tool.jsonSchema["required"])
+    ? tool.jsonSchema["required"].filter((item): item is string => typeof item === "string")
+    : [];
+  for (const name of required) {
+    if (!Object.hasOwn(input, name) && !boundInputs.includes(name)) {
+      throw routingError("INVALID_TOOL_INPUT", "A required sequence input has no literal value or binding");
+    }
+  }
+
+  assertNoSecretValues(input, secrets);
+  assertNoUnknownKeys(input, tool.jsonSchema, tool.jsonSchema);
+  const parsed = tool.definition.inputSchema.partial().safeParse(input);
+  if (!parsed.success) {
+    throw routingError(
+      "INVALID_TOOL_INPUT",
+      `Tool ${JSON.stringify(tool.definition.name)} received invalid sequence literal input`,
+    );
+  }
+  assertInputKeysPreserved(input, parsed.data);
+  const normalized = jsonObjectClone(parsed.data, "INVALID_TOOL_INPUT");
+  if (boundInputs.some((target) => Object.hasOwn(normalized, target))) {
+    throw routingError("INVALID_TOOL_DEFINITION", "A bound input received an implicit schema default");
+  }
   assertNoSecretValues(normalized, secrets);
   return normalized;
 }

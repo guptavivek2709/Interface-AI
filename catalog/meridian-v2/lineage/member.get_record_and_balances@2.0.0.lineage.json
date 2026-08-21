@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+  "lineageId": "lineage.member.get_record_and_balances.e1e7e750043439ac",
+  "capabilityId": "member.get_record_and_balances",
+  "capabilityVersion": "2.0.0",
+  "stage": "approved",
+  "discovery": {
+    "runId": "discovery.f181ec0b-bcb3-4ed5-ba07-c5ef359b90cd",
+    "provider": "anthropic-messages",
+    "model": "claude-sonnet-5",
+    "mode": "model",
+    "traceDigest": "b1cdabffbc739c7c6991f8fa624a9afb7d9562064ff855503cbe4006cfd01dc7"
+  },
+  "draftDigest": "82d6106415476bc7704ba3ceff9a1c2d72e17cfa60ce1074c1016e484ef7e406",
+  "reviewedDigest": "3f0ea2987889031af9c954ad4d5757b79f8e35f0d55cd2d9cb901886c4b61b33",
+  "approvedDigest": "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a",
+  "events": [
+    {
+      "type": "draft_created",
+      "at": "2026-08-21T06:06:25.581Z",
+      "actor": "discovery_compiler",
+      "artifactDigest": "82d6106415476bc7704ba3ceff9a1c2d72e17cfa60ce1074c1016e484ef7e406",
+      "traceDigest": "b1cdabffbc739c7c6991f8fa624a9afb7d9562064ff855503cbe4006cfd01dc7"
+    },
+    {
+      "type": "reviewed",
+      "at": "2026-08-21T06:22:43.635Z",
+      "actor": "codex-locator-resilience-review",
+      "artifactDigest": "3f0ea2987889031af9c954ad4d5757b79f8e35f0d55cd2d9cb901886c4b61b33",
+      "parentArtifactDigest": "82d6106415476bc7704ba3ceff9a1c2d72e17cfa60ce1074c1016e484ef7e406",
+      "reviewDiffDigest": "b88f448af42e91091bb577d78a3a90e468132a9894b3ef3f5a0a6e333f5130eb",
+      "changedPathCount": 26
+    },
+    {
+      "type": "canary_passed",
+      "at": "2026-08-21T06:23:22.975Z",
+      "actor": "canary_runner",
+      "artifactDigest": "3f0ea2987889031af9c954ad4d5757b79f8e35f0d55cd2d9cb901886c4b61b33",
+      "canaryRunId": "canary.7fdf0e44-0985-4129-9820-59c2f37bcbc7",
+      "evidenceDigest": "d6dcd5517beb6167cdb8abe11c10342512713c648b93e580797abd785e397050"
+    },
+    {
+      "type": "approved",
+      "at": "2026-08-21T06:23:49.253Z",
+      "actor": "codex-final-promotion",
+      "artifactDigest": "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a",
+      "parentArtifactDigest": "3f0ea2987889031af9c954ad4d5757b79f8e35f0d55cd2d9cb901886c4b61b33"
+    }
+  ]
+}

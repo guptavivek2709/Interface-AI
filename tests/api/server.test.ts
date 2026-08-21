@@ -6,11 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApiServer } from "../../src/api/index.js";
 import { StaticConsoleIdentityProvider } from "../../src/api/index.js";
 import { meridianArtifacts } from "../../src/capabilities/index.js";
-import { CapabilityCatalog } from "../../src/catalog/index.js";
+import { CapabilityCatalog, loadConfiguredCapabilityCatalog } from "../../src/catalog/index.js";
 import {
   ChatRequestCancelledError,
   ChatRoutingError,
-  DeterministicChatRouter,
   type ChatRouteRequest,
   type ChatRouteResult,
   type ChatRouter,
@@ -33,6 +32,62 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function readSseUntil(
+  reader: { read(): Promise<{ done: boolean; value: Uint8Array | undefined }> },
+  marker: string,
+  timeoutMs = 2_000,
+): Promise<{ text: string; done: boolean }> {
+  const decoder = new TextDecoder();
+  let text = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const consume = async () => {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.value) text += decoder.decode(chunk.value, { stream: !chunk.done });
+      if (text.includes(marker) || chunk.done) return { text, done: chunk.done };
+    }
+  };
+  try {
+    return await Promise.race([
+      consume(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for SSE marker ${marker}`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Test-only intent seam; production constructs the Anthropic router. */
+class TestInvocationChatRouter implements ChatRouter {
+  readonly name = "api-test-intent";
+  readonly model = null;
+  readonly requestTimeoutMs = 1_000;
+
+  async route(request: ChatRouteRequest): Promise<ChatRouteResult> {
+    const tool = request.tools.find(
+      (candidate) => candidate.capabilityId === "member.get_record_and_balances",
+    );
+    if (!tool) throw new Error("Expected balance capability in the API test catalog");
+    return {
+      kind: "invoke",
+      toolCallId: "api-test-tool-call",
+      toolName: tool.name,
+      capabilityId: tool.capabilityId,
+      capabilityVersion: tool.capabilityVersion,
+      arguments: { member_number: "100234" },
+      assistantText: null,
+      metadata: {
+        provider: "api-test-intent",
+        model: null,
+        responseId: null,
+        latencyMs: 0,
+      },
+    };
+  }
 }
 
 class BlockingResource extends Resource {
@@ -70,7 +125,11 @@ class SuccessRunner implements ManagedReplayRunnerV2 {
         evidencePaths: [],
         status: "success",
         outputs:
-          this.#request.capabilityId === "member.get_record_and_balances"
+          this.#request.capabilityId === "member.search_by_last_name"
+            ? {
+                candidates: [{ member_number: "100234", name: "Ada Example", share_count: 1 }],
+              }
+          : this.#request.capabilityId === "member.get_record_and_balances"
             ? {
                 member_number: "100234",
                 member_name: "Ada Example",
@@ -105,8 +164,13 @@ const CURRENT_CHALLENGE = "11111111-1111-4111-8111-111111111111";
 
 class ApprovalRunner implements ManagedReplayRunnerV2 {
   readonly #request: ManagedRunnerFactoryRequest;
-  constructor(request: ManagedRunnerFactoryRequest) {
+  readonly #requirement: "user_confirmation" | "supervisor_confirmation";
+  constructor(
+    request: ManagedRunnerFactoryRequest,
+    requirement: "user_confirmation" | "supervisor_confirmation" = "user_confirmation",
+  ) {
     this.#request = request;
+    this.#requirement = requirement;
   }
   async run(): Promise<ReplayProgressV2> {
     return {
@@ -117,7 +181,7 @@ class ApprovalRunner implements ManagedReplayRunnerV2 {
         runId: this.#request.runId,
         stepId: "commit_transfer",
         stepTitle: "Post transfer",
-        requirement: "user_confirmation",
+        requirement: this.#requirement,
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         expiresInMs: 60_000,
@@ -130,31 +194,202 @@ class ApprovalRunner implements ManagedReplayRunnerV2 {
   issueApproval(): string {
     return "test-approval";
   }
-  async resume(): Promise<ReplayProgressV2> {
+  async resume(_approvalToken: string): Promise<ReplayProgressV2> {
     return new SuccessRunner(this.#request).run();
   }
   async close(): Promise<void> {}
+}
+
+class EffectUnknownRunner implements ManagedReplayRunnerV2 {
+  readonly #request: ManagedRunnerFactoryRequest;
+  constructor(request: ManagedRunnerFactoryRequest) {
+    this.#request = request;
+  }
+  async run(): Promise<ReplayProgressV2> {
+    return {
+      status: "terminal",
+      phase: "completed",
+      result: {
+        runId: this.#request.runId,
+        capabilityId: this.#request.capabilityId,
+        capabilityVersion: this.#request.capabilityVersion,
+        artifactDigest: this.#request.artifactDigest,
+        inputDigest: this.#request.inputDigest,
+        sessionRef: this.#request.sessionRef,
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        journal: [],
+        incidents: [],
+        evidencePaths: [],
+        status: "failure",
+        code: "EFFECT_UNKNOWN",
+        message: "The write outcome requires reconciliation.",
+        retryable: false,
+        effectUncertain: true,
+        reconciliationOutputs: {
+          email_before: "ada@example.test",
+          phone_before: "555-0100",
+          address_before: "100 Test Street",
+        },
+      },
+    };
+  }
+  issueApproval(): string {
+    throw new Error("Not awaiting approval");
+  }
+  resume(): Promise<ReplayProgressV2> {
+    throw new Error("Not awaiting approval");
+  }
+  async close(): Promise<void> {}
+}
+
+const CURRENT_INTERVENTION = "22222222-2222-4222-8222-222222222222";
+
+class HandoffRunner implements ManagedReplayRunnerV2 {
+  readonly #request: ManagedRunnerFactoryRequest;
+  readonly #release: () => Promise<void>;
+  readonly #action: "restore_session" | "authenticate_supervisor";
+  readonly #requiredRole: string | undefined;
+  readonly #onAction: (() => void | Promise<void>) | undefined;
+  readonly #resumeToSupervisorApproval: boolean;
+  #state: "awaiting_human" | "human_active" | "action_completed" | "revalidating" = "awaiting_human";
+  #actorId: string | undefined;
+  #actionCompleted = false;
+  #approvalRunner: ApprovalRunner | undefined;
+
+  constructor(
+    request: ManagedRunnerFactoryRequest,
+    release: () => Promise<void>,
+    options: {
+      action?: "restore_session" | "authenticate_supervisor";
+      requiredRole?: string;
+      onAction?: () => void | Promise<void>;
+      resumeToSupervisorApproval?: boolean;
+    } = {},
+  ) {
+    this.#request = request;
+    this.#release = release;
+    this.#action = options.action ?? "restore_session";
+    this.#requiredRole = options.requiredRole;
+    this.#onAction = options.onAction;
+    this.#resumeToSupervisorApproval = options.resumeToSupervisorApproval ?? false;
+  }
+
+  async run(): Promise<ReplayProgressV2> {
+    return this.#progress();
+  }
+
+  issueApproval(): string {
+    if (!this.#approvalRunner) throw new Error("Not awaiting approval");
+    return this.#approvalRunner.issueApproval();
+  }
+
+  resume(approvalToken: string): Promise<ReplayProgressV2> {
+    if (!this.#approvalRunner) throw new Error("Not awaiting approval");
+    return this.#approvalRunner.resume(approvalToken);
+  }
+
+  async takeHumanControl(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    if (interventionId !== CURRENT_INTERVENTION) throw new Error("Stale intervention");
+    if (this.#requiredRole && !actor.roles.includes(this.#requiredRole)) {
+      throw Object.assign(new Error("Required role missing"), { code: "ROLE_REQUIRED" });
+    }
+    this.#actorId = actor.id;
+    this.#state = "human_active";
+    return this.#progress();
+  }
+
+  async performHumanAction(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+    action: "restore_session" | "authenticate_supervisor",
+  ): Promise<ReplayProgressV2> {
+    if (interventionId !== CURRENT_INTERVENTION || actor.id !== this.#actorId || action !== this.#action) {
+      throw new Error("Invalid intervention action");
+    }
+    await this.#onAction?.();
+    this.#actionCompleted = true;
+    this.#state = "action_completed";
+    return this.#progress();
+  }
+
+  async resumeHuman(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    if (
+      interventionId !== CURRENT_INTERVENTION ||
+      actor.id !== this.#actorId ||
+      !this.#actionCompleted ||
+      this.#state !== "action_completed"
+    ) {
+      throw new Error("Invalid intervention resume");
+    }
+    this.#state = "revalidating";
+    if (this.#resumeToSupervisorApproval) {
+      this.#approvalRunner = new ApprovalRunner(this.#request, "supervisor_confirmation");
+      return this.#approvalRunner.run();
+    }
+    return new SuccessRunner(this.#request).run();
+  }
+
+  async close(): Promise<void> {
+    await this.#release();
+  }
+
+  #progress(): Extract<ReplayProgressV2, { status: "awaiting_human" }> {
+    return {
+      status: "awaiting_human",
+      phase: "awaiting_human",
+      intervention: {
+        interventionId: CURRENT_INTERVENTION,
+        runId: this.#request.runId,
+        stepId: "open_member",
+        reasonCode: "SESSION_EXPIRED",
+        action: this.#action,
+        ...(this.#requiredRole ? { requiredRole: this.#requiredRole } : {}),
+        state: this.#state,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        sameLiveSession: true,
+      },
+      journal: [],
+      incidents: [{
+        code: "SESSION_EXPIRED",
+        category: "intervention",
+        message: "RAW_TARGET_SESSION_CANARY",
+        stepId: "open_member",
+        occurredAt: new Date().toISOString(),
+      }],
+    };
+  }
 }
 
 const apps: Array<ReturnType<typeof buildApiServer>> = [];
 
 async function fixture(options: {
   approvalForWrites?: boolean;
+  handoffForReads?: boolean;
   chat?: ChatRouter;
+  catalog?: CapabilityCatalog;
   failCapability?: string;
+  effectUnknownCapability?: string;
   signOnFails?: boolean;
   signOnPaused?: boolean;
   sessionResource?: Resource;
   onFactoryRequest?: (request: ManagedRunnerFactoryRequest) => void;
   sessionNow?: () => number;
 } = {}) {
-  const catalog = CapabilityCatalog.fromArtifacts(meridianArtifacts);
+  const catalog = options.catalog ?? CapabilityCatalog.fromArtifacts(meridianArtifacts);
   const sessions = new SessionManager<PlaywrightSurface>({
     ...(options.sessionNow ? { now: options.sessionNow, idleTtlMs: 5_000 } : {}),
   });
   const pending = new Map<string, { operatorId: string; role: "teller" | "supervisor"; branch: string }>();
   const runs = new RunManager({
-    runnerFactory: (request) => {
+    runnerFactory: async (request) => {
       options.onFactoryRequest?.(request);
       if (options.signOnFails && request.capabilityId === "session.sign_on") {
         throw new Error("SIGNON_SECRET_CANARY C:\\private\\browser-profile");
@@ -165,8 +400,31 @@ async function fixture(options: {
       if (options.failCapability === request.capabilityId) {
         throw new Error("RUNNER_SECRET_CANARY C:\\private\\member-100234.html");
       }
+      if (options.effectUnknownCapability === request.capabilityId) {
+        return new EffectUnknownRunner(request);
+      }
       if (options.approvalForWrites && request.capabilityId === "funds.transfer") {
         return new ApprovalRunner(request);
+      }
+      if (options.handoffForReads && request.capabilityId === "member.get_record_and_balances") {
+        const lease = await sessions.acquire(request.sessionRef, request.runId);
+        return new HandoffRunner(request, async () => lease.release());
+      }
+      if (request.capabilityId === "account.place_hold") {
+        const lease = await sessions.acquire(request.sessionRef, request.runId);
+        return new HandoffRunner(request, async () => lease.release(), {
+          action: "authenticate_supervisor",
+          requiredRole: "supervisor",
+          resumeToSupervisorApproval: true,
+          onAction: () => {
+            sessions.rebindPrincipal(
+              request.sessionRef,
+              request.runId,
+              lease.principal,
+              { operatorId: "super1", role: "supervisor", branch: lease.principal.branch },
+            );
+          },
+        });
       }
       return new SuccessRunner(
         request,
@@ -195,7 +453,7 @@ async function fixture(options: {
     catalog,
     runs,
     sessions,
-    chat: options.chat ?? new DeterministicChatRouter(),
+    chat: options.chat ?? new TestInvocationChatRouter(),
     identity,
     credentials: {
       teller: { operator: "teller1", password: "server-only-password", role: "teller" },
@@ -236,7 +494,6 @@ function metadata(provider = "test-provider") {
     model: "private-model-id",
     responseId: "private-provider-response-id",
     latencyMs: 42,
-    fallbackFrom: null,
   } as const;
 }
 
@@ -254,6 +511,47 @@ class ExposingChatRouter implements ChatRouter {
       arguments: { member_number: "100234" },
       assistantText: "Prepared for local review.",
       metadata: metadata(),
+    };
+  }
+}
+
+class SequenceChatRouter implements ChatRouter {
+  readonly name = "sequence-test-router";
+  readonly model = "private-model-id";
+  readonly requestTimeoutMs = 1_000;
+  async route(): Promise<ChatRouteResult> {
+    return {
+      kind: "sequence",
+      toolCallId: "private-sequence-tool-call-id",
+      failurePolicy: "stop_on_non_success",
+      assistantText: "I will find the member and load the unique result.",
+      metadata: metadata(),
+      steps: [
+        {
+          stepId: "search",
+          toolName: "member_search_by_last_name",
+          capabilityId: "member.search_by_last_name",
+          capabilityVersion: "2.0.0",
+          literalArguments: { last_name: "Example" },
+          bindings: [],
+        },
+        {
+          stepId: "balances",
+          toolName: "member_get_record_and_balances",
+          capabilityId: "member.get_record_and_balances",
+          capabilityVersion: "2.0.0",
+          literalArguments: {},
+          bindings: [{
+            sourceStepId: "search",
+            sourceCollectionPath: ["candidates"],
+            valuePath: ["member_number"],
+            targetInput: "member_number",
+            selection: "exactly_one",
+            onZero: "stop_no_match",
+            onMany: "pause_for_authenticated_selection",
+          }],
+        },
+      ],
     };
   }
 }
@@ -302,12 +600,213 @@ describe("MERIDIAN API", () => {
     expect(unauthorized.statusCode).toBe(401);
     const catalog = await app.inject({ method: "GET", url: "/api/v1/capabilities", headers: { cookie } });
     expect(catalog.statusCode).toBe(200);
-    expect(catalog.json().capabilities).toHaveLength(8);
+    const capabilities = catalog.json().capabilities as Array<Record<string, unknown>>;
+    expect(capabilities).toHaveLength(8);
+    expect(capabilities.find((item) => item.id === "account.place_hold")).toMatchObject({
+      risk: "supervisor_only",
+      supportsSupervisorHandoff: true,
+    });
+    expect(
+      capabilities
+        .filter((item) => item.id !== "account.place_hold")
+        .every((item) => item.supportsSupervisorHandoff === false),
+    ).toBe(true);
     const openapi = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
     expect(openapi.json()).toMatchObject({ openapi: "3.1.0" });
   });
 
-  it("rejects cross-surface mutation calls and requires idempotency for writes", async () => {
+  it("publishes responses and every required path parameter for all OpenAPI operations", async () => {
+    const { app } = await fixture();
+    const response = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
+    expect(response.statusCode).toBe(200);
+    const document = response.json() as { paths: Record<string, Record<string, unknown>> };
+    const operationMethods = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
+
+    for (const [pathTemplate, pathItem] of Object.entries(document.paths)) {
+      const templateVariables = [...pathTemplate.matchAll(/\{([^{}]+)\}/gu)].map((match) => match[1]!);
+      for (const method of operationMethods) {
+        const operation = pathItem[method];
+        if (!operation || typeof operation !== "object" || Array.isArray(operation)) continue;
+        const operationRecord = operation as Record<string, unknown>;
+        const responses = operationRecord.responses;
+        expect(
+          responses && typeof responses === "object" && !Array.isArray(responses)
+            ? Object.keys(responses).length
+            : 0,
+          `${method.toUpperCase()} ${pathTemplate} must document at least one response`,
+        ).toBeGreaterThan(0);
+
+        const parameters = [pathItem.parameters, operationRecord.parameters]
+          .filter(Array.isArray)
+          .flat() as Array<Record<string, unknown>>;
+        for (const name of templateVariables) {
+          expect(
+            parameters.some(
+              (parameter) =>
+                parameter.in === "path" &&
+                parameter.name === name &&
+                parameter.required === true,
+            ),
+            `${method.toUpperCase()} ${pathTemplate} must declare required path parameter ${name}`,
+          ).toBe(true);
+        }
+      }
+    }
+
+    expect((document.paths["/api/v1/runs"]!.get as Record<string, unknown>).summary).toBe(
+      "List identity-visible retained runs: owned runs plus active delegated handoffs",
+    );
+    expect(
+      (document.paths["/api/v1/runs/{runId}/handoff/action"]!.post as Record<string, unknown>).summary,
+    ).toBe("Restore the session or authenticate a supervisor using the server-selected action");
+  });
+
+  it("serves only authenticated, published discovery history with invocation values withheld", async () => {
+    const publishedCatalog = await loadConfiguredCapabilityCatalog({
+      environment: {
+        CAPABILITY_ARTIFACT_ROOT: path.resolve("catalog", "meridian-v2", "artifacts"),
+        CAPABILITY_LINEAGE_ROOT: path.resolve("catalog", "meridian-v2", "lineage"),
+      },
+    });
+    const { app, cookie } = await fixture({ catalog: publishedCatalog });
+
+    const unauthorized = await app.inject({ method: "GET", url: "/api/v1/discovery-runs" });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery-runs",
+      headers: { cookie },
+    });
+    expect(list.statusCode).toBe(200);
+    const discoveryRuns = list.json().discoveryRuns as Array<Record<string, unknown>>;
+    expect(discoveryRuns).toHaveLength(8);
+    for (const record of discoveryRuns) {
+      expect(record).toMatchObject({
+        kind: "discovery",
+        status: "approved",
+        provider: "anthropic-messages",
+      });
+      const inputs = record.inputs as Array<Record<string, unknown>>;
+      expect(inputs.every((input) => input.valueStatus === "withheld" && !("value" in input))).toBe(true);
+    }
+    const balances = discoveryRuns.find(
+      (record) => record.capabilityId === "member.get_record_and_balances",
+    );
+    expect(balances).toMatchObject({
+      kind: "discovery",
+      id: expect.stringMatching(/^discovery\./u),
+      discoveryRunId: expect.stringMatching(/^discovery\./u),
+      capabilityId: "member.get_record_and_balances",
+      capabilityVersion: "2.0.0",
+      createdAt: expect.stringMatching(/^2026-/u),
+      completedAt: expect.stringMatching(/^2026-/u),
+      status: "approved",
+      provider: "anthropic-messages",
+      model: expect.any(String),
+      goal: expect.any(String),
+      inputs: [
+        {
+          name: "member_number",
+          type: expect.objectContaining({ kind: "string", format: "member_number" }),
+          classification: "restricted",
+          required: true,
+          valueStatus: "withheld",
+        },
+      ],
+      outputContract: expect.arrayContaining([
+        expect.objectContaining({
+          name: "member_number",
+          type: expect.objectContaining({ kind: "string", format: "member_number" }),
+          classification: "restricted",
+        }),
+        expect.objectContaining({ name: "shares", classification: "restricted" }),
+      ]),
+      output: {
+        traceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        draftDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        reviewedDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        canaryRunId: expect.stringMatching(/^canary\./u),
+        approvedDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+      timeline: [
+        expect.objectContaining({ type: "draft_created", actor: "discovery_compiler" }),
+        expect.objectContaining({ type: "reviewed", reviewDiffDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }),
+        expect.objectContaining({ type: "canary_passed", evidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }),
+        expect.objectContaining({ type: "approved" }),
+      ],
+      evidence: [
+        expect.objectContaining({
+          kind: "artifact",
+          referenceId: "member.get_record_and_balances@2.0.0",
+          url: "/api/v1/capabilities/member.get_record_and_balances/2.0.0",
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        }),
+        expect.objectContaining({
+          kind: "lineage",
+          referenceId: expect.stringMatching(/^lineage\./u),
+          url: expect.stringMatching(/^\/api\/v1\/discovery-runs\/discovery\./u),
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        }),
+      ],
+    });
+    expect(balances?.id).toBe(balances?.discoveryRunId);
+    expect(JSON.stringify(balances?.inputs)).not.toContain("100234");
+    expect(JSON.stringify(balances)).not.toContain("catalog/meridian-v2");
+    expect(balances).not.toHaveProperty("trace");
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/discovery-runs/${encodeURIComponent(String(balances?.id))}`,
+      headers: { cookie },
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().discoveryRun).toEqual(balances);
+
+    const missing = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery-runs/discovery.missing",
+      headers: { cookie },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({
+      error: { code: "DISCOVERY_RUN_NOT_FOUND", message: "Discovery run not found" },
+    });
+
+    const openapi = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
+    expect(openapi.json()).toMatchObject({
+      components: {
+        schemas: {
+          DiscoveryRun: expect.objectContaining({
+            required: expect.arrayContaining(["outputContract"]),
+          }),
+          DiscoveryRunOutputField: expect.any(Object),
+        },
+      },
+      paths: {
+        "/api/v1/discovery-runs": { get: expect.any(Object) },
+        "/api/v1/discovery-runs/{id}": { get: expect.any(Object) },
+        "/api/v1/chat": {
+          post: {
+            summary: "Return an Anthropic reply, exact capability proposal, or bounded sequence; never starts or approves a run.",
+          },
+        },
+      },
+    });
+  });
+
+  it("does not synthesize discovery history for artifacts without published lineage", async () => {
+    const { app, cookie } = await fixture();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery-runs",
+      headers: { cookie },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ discoveryRuns: [] });
+  });
+
+  it("rejects cross-surface mutation calls, requires write idempotency, and gates supervisor work", async () => {
     const { app, catalog, cookie } = await fixture();
     const body = {
       capabilityId: "funds.transfer",
@@ -351,8 +850,25 @@ describe("MERIDIAN API", () => {
         },
       },
     });
-    expect(supervisorOnly.statusCode).toBe(403);
-    expect(supervisorOnly.json()).toMatchObject({ error: { code: "SUPERVISOR_REQUIRED" } });
+    expect(supervisorOnly.statusCode).toBe(202);
+    const supervisorRunId = supervisorOnly.json().run.runId as string;
+    await vi.waitFor(async () => {
+      const gated = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${supervisorRunId}`,
+        headers: { cookie },
+      });
+      expect(gated.json().run).toMatchObject({
+        phase: "awaiting_human",
+        progress: {
+          intervention: {
+            action: "authenticate_supervisor",
+            requiredRole: "supervisor",
+            sameLiveSession: true,
+          },
+        },
+      });
+    });
   });
 
   it("queues read work with a server-resolved approved artifact digest", async () => {
@@ -374,6 +890,73 @@ describe("MERIDIAN API", () => {
       artifactDigest: entry.digest,
     });
     expect(response.json().run).not.toHaveProperty("sessionRef");
+  });
+
+  it("starts a read-only reconciliation from EFFECT_UNKNOWN and classifies the real current snapshot", async () => {
+    const { app, catalog, cookie } = await fixture({
+      effectUnknownCapability: "member.update_information",
+    });
+    const capability = catalog.get("member.update_information", "2.0.0")!;
+    const source = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: {
+        cookie,
+        "x-meridian-action": "operator",
+        "idempotency-key": "effect-unknown-update-1",
+      },
+      payload: {
+        capabilityId: capability.id,
+        capabilityVersion: capability.version,
+        artifactDigest: capability.digest,
+        inputs: {
+          member_number: "100234",
+          email: "changed@example.test",
+          phone: "555-0199",
+          address: "200 Changed Street",
+        },
+      },
+    });
+    expect(source.statusCode).toBe(202);
+    const sourceRunId = source.json().run.runId as string;
+    await vi.waitFor(async () => {
+      const current = await app.inject({ method: "GET", url: `/api/v1/runs/${sourceRunId}`, headers: { cookie } });
+      expect(current.json().run.progress.result).toMatchObject({
+        status: "failure",
+        code: "EFFECT_UNKNOWN",
+        effectUncertain: true,
+      });
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${sourceRunId}/reconciliation`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {},
+    });
+    expect(started.statusCode).toBe(202);
+    expect(started.json().run).toMatchObject({
+      capabilityId: "member.get_record_and_balances",
+      orchestration: { kind: "reconciliation", sourceRunId },
+    });
+    await vi.waitFor(async () => {
+      const result = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${sourceRunId}/reconciliation`,
+        headers: { cookie },
+      });
+      expect(result.statusCode).toBe(200);
+      expect(result.json().reconciliation).toMatchObject({
+        sourceRunId,
+        status: "complete",
+        decision: {
+          classification: "not_applied",
+          checkedFields: ["email", "phone", "address", "pre_commit_values"],
+        },
+      });
+      expect(result.body).not.toContain("changed@example.test");
+      expect(result.body).not.toContain("200 Changed Street");
+    });
   });
 
   it("keeps target credentials out of run-manager inputs and public digests", async () => {
@@ -497,7 +1080,7 @@ describe("MERIDIAN API", () => {
     expect(rejected.json()).toMatchObject({ error: { code: "SESSION_NOT_ACTIVE" } });
   });
 
-  it("keeps offline chat proposal-only and never exposes sign-on", async () => {
+  it("returns a catalog-bound invocation and never exposes sign-on", async () => {
     const { app, cookie } = await fixture();
     const response = await app.inject({
       method: "POST",
@@ -512,6 +1095,97 @@ describe("MERIDIAN API", () => {
       route: { kind: "invoke", capabilityId: "member.get_record_and_balances" },
     });
     expect(response.json()).not.toHaveProperty("run");
+  });
+
+  it("executes a server-bound chat sequence in order and resolves typed outputs without trusting the model", async () => {
+    const requests: ManagedRunnerFactoryRequest[] = [];
+    const { app, cookie } = await fixture({
+      chat: new SequenceChatRouter(),
+      onFactoryRequest: (request) => requests.push(request),
+    });
+    const proposed = await app.inject({
+      method: "POST",
+      url: "/api/v1/chat",
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { message: "Find Example and show the unique member balances" },
+    });
+    expect(proposed.statusCode).toBe(200);
+    const plan = proposed.json().route;
+    expect(plan).toMatchObject({
+      kind: "sequence",
+      failurePolicy: "stop_on_non_success",
+      steps: [
+        { stepId: "search", capabilityId: "member.search_by_last_name", artifactDigest: expect.any(String) },
+        { stepId: "balances", capabilityId: "member.get_record_and_balances", artifactDigest: expect.any(String) },
+      ],
+    });
+    expect(plan.sequenceId).toMatch(/^[a-f0-9-]{36}$/u);
+    expect(proposed.body).not.toContain("private-sequence-tool-call-id");
+    expect(proposed.body).not.toContain("private-provider-response-id");
+    expect(proposed.body).not.toContain("private-model-id");
+
+    const firstStep = plan.steps[0];
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {
+        capabilityId: firstStep.capabilityId,
+        capabilityVersion: firstStep.capabilityVersion,
+        artifactDigest: firstStep.artifactDigest,
+        inputs: firstStep.literalArguments,
+        sequence: { sequenceId: plan.sequenceId, stepId: firstStep.stepId },
+      },
+    });
+    expect(first.statusCode).toBe(202);
+    const firstRunId = first.json().run.runId as string;
+    await vi.waitFor(async () => {
+      const current = await app.inject({ method: "GET", url: `/api/v1/runs/${firstRunId}`, headers: { cookie } });
+      expect(current.json().run.phase).toBe("completed");
+    });
+
+    const secondStep = plan.steps[1];
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {
+        capabilityId: secondStep.capabilityId,
+        capabilityVersion: secondStep.capabilityVersion,
+        artifactDigest: secondStep.artifactDigest,
+        inputs: secondStep.literalArguments,
+        sequence: { sequenceId: plan.sequenceId, stepId: secondStep.stepId },
+      },
+    });
+    expect(second.statusCode).toBe(202);
+    expect(second.json().run.orchestration).toMatchObject({
+      kind: "chat_sequence",
+      sequenceId: plan.sequenceId,
+      stepId: "balances",
+      stepIndex: 1,
+      stepCount: 2,
+      parentRunId: firstRunId,
+    });
+    await vi.waitFor(() => {
+      const factoryRequest = requests.find((request) => request.runId === second.json().run.runId);
+      expect(factoryRequest?.inputs).toEqual({ member_number: "100234" });
+      expect(factoryRequest?.orchestration).toMatchObject({ parentRunId: firstRunId });
+    });
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {
+        capabilityId: secondStep.capabilityId,
+        capabilityVersion: secondStep.capabilityVersion,
+        artifactDigest: secondStep.artifactDigest,
+        inputs: secondStep.literalArguments,
+        sequence: { sequenceId: plan.sequenceId, stepId: secondStep.stepId },
+      },
+    });
+    expect(duplicate.statusCode).toBe(202);
+    expect(duplicate.json().run.runId).toBe(second.json().run.runId);
   });
 
   it("projects provider routes and structured errors without leaking provider internals", async () => {
@@ -636,6 +1310,397 @@ describe("MERIDIAN API", () => {
       payload: { challengeId: CURRENT_CHALLENGE, decision: "approve" },
     });
     expect(current.statusCode).toBe(202);
+  });
+
+  it("binds same-session handoff to one opaque intervention and a fixed server action", async () => {
+    const { app, catalog, cookie } = await fixture({ handoffForReads: true });
+    const capability = catalog.get("member.get_record_and_balances", "2.0.0")!;
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {
+        capabilityId: capability.id,
+        artifactDigest: capability.digest,
+        inputs: { member_number: "100234" },
+      },
+    });
+    const runId = queued.json().run.runId as string;
+    let intervention: Record<string, unknown> = {};
+    await vi.waitFor(async () => {
+      const response = await app.inject({ method: "GET", url: `/api/v1/runs/${runId}`, headers: { cookie } });
+      expect(response.json().run.phase).toBe("awaiting_human");
+      intervention = response.json().run.progress.intervention;
+    });
+    expect(intervention).toMatchObject({
+      interventionId: CURRENT_INTERVENTION,
+      runId,
+      reasonCode: "SESSION_EXPIRED",
+      action: "restore_session",
+      state: "awaiting_human",
+      sameLiveSession: true,
+    });
+    const publicRun = await app.inject({ method: "GET", url: `/api/v1/runs/${runId}`, headers: { cookie } });
+    expect(publicRun.body).not.toContain("RAW_TARGET_SESSION_CANARY");
+    expect(publicRun.body).not.toContain("sessionRef");
+
+    const arbitraryAction = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/action`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: {
+        interventionId: CURRENT_INTERVENTION,
+        action: "restore_session",
+        locator: "#unreviewed",
+      },
+    });
+    expect(arbitraryAction.statusCode).toBe(400);
+
+    const staleTake = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/take`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId: "33333333-3333-4333-8333-333333333333" },
+    });
+    expect(staleTake.statusCode).toBe(409);
+    const taken = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/take`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId: CURRENT_INTERVENTION },
+    });
+    expect(taken.statusCode).toBe(202);
+    expect(taken.json().run.progress.intervention.state).toBe("human_active");
+
+    const prematureResume = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/resume`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId: CURRENT_INTERVENTION },
+    });
+    expect(prematureResume.statusCode).toBe(409);
+    expect(prematureResume.json()).toMatchObject({ error: { code: "RUN_NOT_HANDOFFABLE" } });
+
+    const blockedLogout = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: { cookie, "x-meridian-action": "operator" },
+    });
+    expect(blockedLogout.statusCode).toBe(409);
+    expect(blockedLogout.json()).toMatchObject({ error: { code: "RUN_IN_PROGRESS" } });
+
+    const acted = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/action`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId: CURRENT_INTERVENTION, action: "restore_session" },
+    });
+    expect(acted.statusCode).toBe(202);
+    expect(acted.json().run.progress.intervention.state).toBe("action_completed");
+    const resumed = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/resume`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId: CURRENT_INTERVENTION },
+    });
+    expect(resumed.statusCode).toBe(202);
+    await vi.waitFor(async () => {
+      const response = await app.inject({ method: "GET", url: `/api/v1/runs/${runId}`, headers: { cookie } });
+      expect(response.json().run.phase).toBe("completed");
+      expect(response.json().run.progress.result.status).toBe("success");
+    });
+
+    const openapi = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
+    expect(openapi.json().paths).toHaveProperty("/api/v1/runs/{runId}/handoff/action");
+    expect(openapi.json().components.schemas.HandoffActionRequest).toMatchObject({
+      additionalProperties: false,
+      properties: { action: { enum: ["restore_session", "authenticate_supervisor"] } },
+    });
+  });
+
+  it("uses a one-time scoped invitation for supervisor takeover of the retained session", async () => {
+    const { app, catalog, cookie, signOnRunId } = await fixture();
+    const hold = catalog.get("account.place_hold", "2.0.0")!;
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: {
+        cookie,
+        "x-meridian-action": "operator",
+        "idempotency-key": "delegated-hold-1",
+      },
+      payload: {
+        capabilityId: hold.id,
+        artifactDigest: hold.digest,
+        inputs: {
+          member_number: "100234",
+          share: "100234-S0001",
+          reason: "FRAUD",
+          notes: "delegated test hold",
+        },
+      },
+    });
+    expect(queued.statusCode).toBe(202);
+    const runId = queued.json().run.runId as string;
+    let interventionId = "";
+    await vi.waitFor(async () => {
+      const response = await app.inject({ method: "GET", url: `/api/v1/runs/${runId}`, headers: { cookie } });
+      expect(response.json().run.phase).toBe("awaiting_human");
+      interventionId = response.json().run.progress.intervention.interventionId;
+    });
+
+    const tellerClaim = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/take`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId },
+    });
+    expect(tellerClaim.statusCode).toBe(403);
+    expect(tellerClaim.json()).toMatchObject({ error: { code: "ROLE_REQUIRED" } });
+
+    const invitationResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/invitations`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId },
+    });
+    expect(invitationResponse.statusCode).toBe(201);
+    expect(invitationResponse.json().invitation).toMatchObject({
+      runId,
+      interventionId,
+      requiredRole: "supervisor",
+      oneTime: true,
+    });
+    const token = invitationResponse.json().invitation.token as string;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+
+    const supervisorLogin = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-meridian-action": "operator" },
+      payload: { accessCode: "supervisor-console-test-code-0001" },
+    });
+    const supervisorCookie = String(supervisorLogin.headers["set-cookie"]).split(";", 1)[0]!;
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${runId}`,
+      headers: { cookie: supervisorCookie },
+    })).statusCode).toBe(404);
+    const beforeRedeem = await app.inject({
+      method: "GET",
+      url: "/api/v1/runs",
+      headers: { cookie: supervisorCookie },
+    });
+    expect(beforeRedeem.statusCode).toBe(200);
+    expect(beforeRedeem.json().runs.map((run: { runId: string }) => run.runId)).not.toContain(runId);
+
+    const redeemed = await app.inject({
+      method: "POST",
+      url: "/api/v1/handoff/invitations/redeem",
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { token },
+    });
+    expect(redeemed.statusCode).toBe(200);
+    expect(redeemed.json().delegation).toMatchObject({ runId, interventionId, requiredRole: "supervisor" });
+    const delegationExpiresAt = Date.parse(redeemed.json().delegation.expiresAt as string);
+    const afterRedeem = await app.inject({
+      method: "GET",
+      url: "/api/v1/runs",
+      headers: { cookie: supervisorCookie },
+    });
+    expect(afterRedeem.statusCode).toBe(200);
+    const delegatedRuns = afterRedeem.json().runs as Array<Record<string, unknown>>;
+    const delegatedRunIds = delegatedRuns.map((run) => run.runId);
+    expect(delegatedRunIds).toContain(runId);
+    expect(delegatedRunIds).not.toContain(signOnRunId);
+    expect(new Set(delegatedRunIds).size).toBe(delegatedRunIds.length);
+    expect(delegatedRuns.find((run) => run.runId === runId)).not.toHaveProperty("sessionRef");
+    const replayed = await app.inject({
+      method: "POST",
+      url: "/api/v1/handoff/invitations/redeem",
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { token },
+    });
+    expect(replayed.statusCode).toBe(409);
+    expect(replayed.json()).toMatchObject({ error: { code: "HANDOFF_INVITATION_INVALID" } });
+
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/take`,
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { interventionId },
+    })).statusCode).toBe(202);
+    const acted = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/action`,
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { interventionId, action: "authenticate_supervisor" },
+    });
+    expect(acted.statusCode).toBe(202);
+    expect(acted.json().run.progress.intervention.state).toBe("action_completed");
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/resume`,
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { interventionId },
+    })).statusCode).toBe(202);
+    let challengeId = "";
+    await vi.waitFor(async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${runId}`,
+        headers: { cookie: supervisorCookie },
+      });
+      expect(response.json().run).not.toHaveProperty("sessionRef");
+      expect(response.json().run).toMatchObject({
+        phase: "awaiting_approval",
+        progress: {
+          challenge: {
+            requirement: "supervisor_confirmation",
+            authorizedRoles: ["supervisor"],
+          },
+        },
+      });
+      challengeId = response.json().run.progress.challenge.challengeId;
+    });
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/approve`,
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { challengeId, decision: "approve" },
+    });
+    expect(approved.statusCode).toBe(202);
+    await vi.waitFor(async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${runId}`,
+        headers: { cookie: supervisorCookie },
+      });
+      expect(response.json().run.phase).toBe("completed");
+    });
+
+    const expiryClock = vi.spyOn(Date, "now").mockReturnValue(delegationExpiresAt + 1);
+    try {
+      const expiredList = await app.inject({
+        method: "GET",
+        url: "/api/v1/runs",
+        headers: { cookie: supervisorCookie },
+      });
+      expect(expiredList.statusCode).toBe(200);
+      expect(expiredList.json().runs.map((run: { runId: string }) => run.runId)).not.toContain(runId);
+      expect((await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${runId}`,
+        headers: { cookie: supervisorCookie },
+      })).statusCode).toBe(404);
+    } finally {
+      expiryClock.mockRestore();
+    }
+    const ownerList = await app.inject({ method: "GET", url: "/api/v1/runs", headers: { cookie } });
+    expect(ownerList.json().runs.map((run: { runId: string }) => run.runId)).toContain(runId);
+  });
+
+  it("ends an expired delegated SSE stream before emitting later run events while the owner stream continues", async () => {
+    const { app, catalog, cookie } = await fixture();
+    const hold = catalog.get("account.place_hold", "2.0.0")!;
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: {
+        cookie,
+        "x-meridian-action": "operator",
+        "idempotency-key": "delegated-sse-expiry-1",
+      },
+      payload: {
+        capabilityId: hold.id,
+        artifactDigest: hold.digest,
+        inputs: {
+          member_number: "100234",
+          share: "100234-S0001",
+          reason: "FRAUD",
+          notes: "delegated SSE expiry test",
+        },
+      },
+    });
+    expect(queued.statusCode).toBe(202);
+    const runId = queued.json().run.runId as string;
+    let interventionId = "";
+    await vi.waitFor(async () => {
+      const response = await app.inject({ method: "GET", url: `/api/v1/runs/${runId}`, headers: { cookie } });
+      expect(response.json().run.phase).toBe("awaiting_human");
+      interventionId = response.json().run.progress.intervention.interventionId;
+    });
+
+    const invitation = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/handoff/invitations`,
+      headers: { cookie, "x-meridian-action": "operator" },
+      payload: { interventionId },
+    });
+    expect(invitation.statusCode).toBe(201);
+    const supervisorLogin = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-meridian-action": "operator" },
+      payload: { accessCode: "supervisor-console-test-code-0001" },
+    });
+    expect(supervisorLogin.statusCode).toBe(200);
+    const supervisorCookie = String(supervisorLogin.headers["set-cookie"]).split(";", 1)[0]!;
+    const redeemed = await app.inject({
+      method: "POST",
+      url: "/api/v1/handoff/invitations/redeem",
+      headers: { cookie: supervisorCookie, "x-meridian-action": "operator" },
+      payload: { token: invitation.json().invitation.token },
+    });
+    expect(redeemed.statusCode).toBe(200);
+    const expiresAtMs = Date.parse(redeemed.json().delegation.expiresAt as string);
+
+    const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+    const delegatedAbort = new AbortController();
+    const ownerAbort = new AbortController();
+    const commonHeaders = { "last-event-id": "9007199254740991" };
+    const [delegatedResponse, ownerResponse] = await Promise.all([
+      fetch(`${origin}/api/v1/runs/${runId}/events`, {
+        headers: { ...commonHeaders, cookie: supervisorCookie },
+        signal: delegatedAbort.signal,
+      }),
+      fetch(`${origin}/api/v1/runs/${runId}/events`, {
+        headers: { ...commonHeaders, cookie },
+        signal: ownerAbort.signal,
+      }),
+    ]);
+    expect(delegatedResponse.status).toBe(200);
+    expect(ownerResponse.status).toBe(200);
+    const delegatedReader = delegatedResponse.body!.getReader();
+    const ownerReader = ownerResponse.body!.getReader();
+    expect((await readSseUntil(delegatedReader, "retry: 2000")).done).toBe(false);
+    expect((await readSseUntil(ownerReader, "retry: 2000")).done).toBe(false);
+
+    const expiryClock = vi.spyOn(Date, "now").mockReturnValue(expiresAtMs + 1);
+    try {
+      const cancelled = await app.inject({
+        method: "POST",
+        url: `/api/v1/runs/${runId}/cancel`,
+        headers: { cookie, "x-meridian-action": "operator" },
+      });
+      expect(cancelled.statusCode).toBe(200);
+
+      const delegatedClosure = await readSseUntil(delegatedReader, "event: auth.expired");
+      const delegatedEnd = await readSseUntil(delegatedReader, "__stream_end__");
+      const delegatedText = delegatedClosure.text + delegatedEnd.text;
+      expect(delegatedText).toContain('data: {"reason":"reauthenticate"}');
+      expect(delegatedText).not.toContain("event: run.cancelled");
+      expect(delegatedText).not.toContain("delegation");
+      expect(delegatedEnd.done).toBe(true);
+
+      const ownerEvent = await readSseUntil(ownerReader, "event: run.cancelled");
+      expect(ownerEvent.text).toContain("event: run.cancelled");
+      expect(ownerEvent.done).toBe(false);
+    } finally {
+      expiryClock.mockRestore();
+      delegatedAbort.abort();
+      ownerAbort.abort();
+    }
   });
 
   it("lets only the owner cancel approval-paused work and removes the stale challenge", async () => {

@@ -14,29 +14,25 @@ import {
   cancelRun as requestRunCancellation,
   createSession,
   createRun,
-  evidenceFinalizationStatus,
-  evidenceUrl,
-  eventsUrl,
   getCapabilities,
-  getEvidence,
   getAuthState,
+  getDiscoveryRun,
+  getDiscoveryRuns,
   getRun,
   getRuns,
   login,
   logout,
-  normalizeLiveEvent,
-  normalizeRun,
   postChat,
-  type EvidenceItem,
 } from "./api";
 import {
   type ArrayCounts,
   type FlatFormValues,
   fieldDomId,
   fieldPath,
-  flattenProposal,
   humanize,
   isRunnable,
+  prepareProposalInputs,
+  prepareSequenceStepInputs,
   serializeInputs,
 } from "./form";
 import {
@@ -46,36 +42,55 @@ import {
   withoutRun,
 } from "./lifecycle";
 import {
+  canLaunchCapabilityInSession,
+  requiredProfileForCapability,
+} from "./authorization";
+import {
   containsCredentialMaterial,
   containsProtectedMaterial,
-  contractValues,
   isProtectedField,
   isProtectedKey,
-  redactForDisplay,
 } from "./security";
+import { ChatPanel } from "./components/ChatPanel";
+import { DiscoveryRunDetail, DiscoveryRunHistory } from "./components/DiscoveryHistory";
+import { type ApprovalLatch } from "./components/ApprovalPanel";
+import { RunPanel } from "./components/RunDetail";
+import { SecureSessionPanel } from "./components/SecureSessionPanel";
+import { useRunStream } from "./hooks/useRunStream";
+import { useTargetSessionObserver } from "./hooks/useTargetSessionObserver";
+import { useHumanHandoff } from "./hooks/useHumanHandoff";
+import {
+  Alert,
+  Brand,
+  EmptyState,
+  LoadingRows,
+  RISK_LABELS,
+  RiskBadge,
+  errorMessage,
+  formatDate,
+  shortId,
+} from "./components/common";
+import {
+  initialSequenceExecution,
+  resolveSequenceCapability,
+  sequenceRunMatchesStep,
+  updateSequenceStep,
+} from "./sequence";
 import type {
   ApprovalChallenge,
   Capability,
   CapabilityField,
   ChatMessage,
+  ChatSequenceExecution,
+  ChatSequencePlan,
   ConsolePrincipal,
-  ConnectionState,
+  DiscoveryRunRecord,
   FieldType,
   JsonValue,
-  LiveEvent,
   OperatorSession,
   RiskLevel,
   RunRecord,
 } from "./types";
-
-const RISK_LABELS: Record<RiskLevel, string> = {
-  read: "Read only",
-  write: "Writes data",
-  irreversible: "Confirmation required",
-  supervisor_only: "Supervisor only",
-};
-
-const PHASES = ["queued", "running", "awaiting_approval", "completed"] as const;
 const LOCAL_LOCK_KEY = "meridian.console.locally-locked";
 const TAB_LOCK_KEY = "meridian.console.tab-locked";
 const AUTH_EVENT_KEY = "meridian.console.auth-change";
@@ -106,34 +121,37 @@ function capabilityKey(capability: Pick<Capability, "id" | "version">): string {
   return `${capability.id}@${capability.version}`;
 }
 
-function shortId(value: string): string {
-  return value.length > 15 ? `${value.slice(0, 7)}…${value.slice(-5)}` : value;
+type ChatProposal = NonNullable<ChatMessage["proposal"]>;
+type ChatExecution = NonNullable<ChatMessage["execution"]>;
+
+interface ChatApprovalCandidate {
+  message: ChatMessage;
+  binding: {
+    capabilityId: string;
+    capabilityVersion: string;
+    artifactDigest: string;
+    targetProfileDigest: string;
+    arguments: Record<string, JsonValue>;
+    boundInputs: string[];
+  };
+  authorizedRunId: string;
+  run: RunRecord;
+  challenge: ApprovalChallenge;
+  sequenceStepIndex?: number;
 }
 
-function formatBytes(value: number): string {
-  if (value < 1_024) return `${value} B`;
-  if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KB`;
-  return `${(value / 1_048_576).toFixed(1)} MB`;
-}
-
-const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
-});
-
-function formatDate(value?: string): string {
-  if (!value) return "Not available";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Not available";
-  return DATE_FORMATTER.format(date);
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message;
-  return "Something went wrong while contacting the service.";
+function resolveProposalCapability(
+  capabilities: readonly Capability[],
+  proposal: ChatProposal,
+): Capability | undefined {
+  return capabilities.find(
+    (item) =>
+      item.id === proposal.capabilityId &&
+      item.version === proposal.capabilityVersion &&
+      item.digest === proposal.artifactDigest &&
+      item.targetProfileDigest === proposal.targetProfileDigest &&
+      isRunnable(item),
+  );
 }
 
 function errorCode(error: unknown): string {
@@ -175,6 +193,7 @@ async function requestFingerprint(capability: Capability, inputs: Record<string,
     capabilityId: capability.id,
     capabilityVersion: capability.version,
     artifactDigest: capability.digest,
+    targetProfileDigest: capability.targetProfileDigest,
     inputs,
   });
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(binding));
@@ -204,11 +223,24 @@ interface ErrorBoundaryState {
   failed: boolean;
 }
 
-interface ApprovalLatch {
-  runId: string;
-  challengeId: string;
-  status: "accepted" | "unconfirmed";
+interface PendingChatProposalLaunch {
+  kind: "proposal";
+  messageId: string;
+  proposal: ChatProposal;
+  inputs: Record<string, JsonValue>;
+  profile: "teller" | "supervisor";
+  branch: OperatorSession["branch"];
 }
+
+interface PendingChatSequenceLaunch {
+  kind: "sequence";
+  messageId: string;
+  sequence: ChatSequencePlan;
+  profile: "teller" | "supervisor";
+  branch: OperatorSession["branch"];
+}
+
+type PendingChatLaunch = PendingChatProposalLaunch | PendingChatSequenceLaunch;
 
 export class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
   override state: ErrorBoundaryState = { failed: false };
@@ -235,74 +267,6 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBound
     }
     return this.props.children;
   }
-}
-
-function Brand(): ReactNode {
-  return (
-    <div className="brand">
-      <div className="brand-mark" aria-hidden="true"><span>B</span></div>
-      <div>
-        <strong>Bridge Console</strong>
-        <span>Guarded operations</span>
-      </div>
-    </div>
-  );
-}
-
-function RiskBadge({ risk }: { risk: RiskLevel }): ReactNode {
-  return <span className={`badge risk-${risk}`}>{RISK_LABELS[risk]}</span>;
-}
-
-function ConnectionBadge({ state }: { state: ConnectionState }): ReactNode {
-  const labels: Record<ConnectionState, string> = {
-    idle: "No live run",
-    connecting: "Connecting",
-    live: "Live",
-    disconnected: "Updates delayed",
-  };
-  return (
-    <span className={`connection connection-${state}`} role="status">
-      <span aria-hidden="true" />{labels[state]}
-    </span>
-  );
-}
-
-function EmptyState({ icon, title, detail }: { icon: string; title: string; detail: string }): ReactNode {
-  return (
-    <div className="empty-state">
-      <span className="empty-icon" aria-hidden="true">{icon}</span>
-      <strong>{title}</strong>
-      <p>{detail}</p>
-    </div>
-  );
-}
-
-function LoadingRows({ count = 3 }: { count?: number }): ReactNode {
-  return (
-    <div className="loading-rows" aria-label="Loading" role="status">
-      {Array.from({ length: count }, (_, index) => <span key={index} />)}
-    </div>
-  );
-}
-
-function Alert({
-  tone = "critical",
-  title,
-  children,
-  action,
-}: {
-  tone?: "critical" | "warning" | "info" | "positive";
-  title: string;
-  children: ReactNode;
-  action?: ReactNode;
-}): ReactNode {
-  return (
-    <div className={`alert alert-${tone}`} role={tone === "critical" ? "alert" : "status"}>
-      <span className="alert-symbol" aria-hidden="true">{tone === "positive" ? "✓" : tone === "info" ? "i" : "!"}</span>
-      <div><strong>{title}</strong><div className="alert-copy">{children}</div></div>
-      {action ? <div className="alert-action">{action}</div> : null}
-    </div>
-  );
 }
 
 interface FieldControlProps {
@@ -618,11 +582,22 @@ function GuidedRunForm({
         <div><dt>Contract</dt><dd>Schema {capability.schemaVersion}</dd></div>
         <div><dt>Digest</dt><dd title={capability.digest}>{capability.digest ? shortId(capability.digest) : "Verified at server"}</dd></div>
       </dl>
+      {capability.lineage ? (
+        <section className="lineage-panel" aria-label="Approved discovery lineage">
+          <div><p className="eyebrow">Approved discovery lineage</p><strong title={capability.lineage.lineageId}>{capability.lineage.lineageId}</strong></div>
+          <ol>
+            <li><span>Discovery</span><code title={capability.lineage.discoveryRunId}>{shortId(capability.lineage.discoveryRunId)}</code><small title={`${capability.lineage.provider} · ${capability.lineage.model} · trace ${capability.lineage.traceDigest}`}>{capability.lineage.model} · trace {shortId(capability.lineage.traceDigest)}</small></li>
+            <li><span>Draft</span><code title={capability.lineage.draftDigest}>{shortId(capability.lineage.draftDigest)}</code></li>
+            <li><span>Reviewed</span><code title={capability.lineage.reviewedDigest}>{shortId(capability.lineage.reviewedDigest)}</code></li>
+            <li><span>Canary passed</span><code title={capability.lineage.canaryRunId}>{shortId(capability.lineage.canaryRunId)}</code></li>
+            <li><span>Approved</span><code title={capability.lineage.approvedDigest}>{shortId(capability.lineage.approvedDigest)}</code></li>
+          </ol>
+        </section>
+      ) : capability.approval === "approved" ? (
+        <Alert tone="warning" title="Discovery lineage unavailable">This approved entry has no complete discovery, review, canary, and publication projection. It remains visible for diagnosis but cannot establish reviewer-facing lineage.</Alert>
+      ) : null}
       {managedAuthentication ? (
         <Alert tone="info" title="Authentication is service-managed">This capability is cataloged for auditability, but sign-in credentials are resolved outside this user interface.</Alert>
-      ) : null}
-      {!managedAuthentication && capability.schemaVersion !== "2.0" ? (
-        <Alert tone="warning" title="Recorded contract is view-only">This earlier artifact remains visible for traceability. Promote it to a V2 approved contract before starting a new run.</Alert>
       ) : null}
       {capability.approval !== "approved" ? (
         <Alert tone="warning" title="Capability is not approved">Draft and retired contracts cannot be launched from the console.</Alert>
@@ -660,267 +635,6 @@ function GuidedRunForm({
   );
 }
 
-function scalar(value: JsonValue): string {
-  if (value === null) return "—";
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  return String(value);
-}
-
-function ValueView({ value, label = "Structured output" }: { value: JsonValue; label?: string }): ReactNode {
-  if (Array.isArray(value)) {
-    const sample = value.slice(0, 100);
-    const rows = sample.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
-    if (rows.length === sample.length && rows.length > 0) {
-      const columnSample = value.slice(0, 250).filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
-      const allColumns = [...new Set(columnSample.flatMap((row) => Object.keys(row).filter((key) => !isProtectedKey(key))))];
-      const columns = allColumns.slice(0, 12);
-      return (
-        <><div className="table-scroll"><table><caption className="visually-hidden">{label}</caption><thead><tr>{columns.map((column) => <th key={column}>{humanize(column)}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{columns.map((column) => <td key={column}><ValueView value={row[column] ?? null} label={column} /></td>)}</tr>)}</tbody></table></div>{value.length > 100 || allColumns.length > 12 || value.length > 250 ? <p className="value-limit">Showing the first {Math.min(value.length, 100)} of {value.length} rows and up to {Math.min(allColumns.length, 12)} display-safe columns{value.length > 250 ? " discovered from the first 250 rows" : ""}.</p> : null}</>
-      );
-    }
-    return <><ul className="value-list">{sample.map((item, index) => <li key={index}><ValueView value={item} /></li>)}</ul>{value.length > 100 ? <p className="value-limit">Showing the first 100 of {value.length} items.</p> : null}</>;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value).filter(([key]) => !isProtectedKey(key));
-    return <><dl className="value-grid">{entries.slice(0, 250).map(([key, item]) => <div key={key}><dt>{humanize(key)}</dt><dd><ValueView value={item} label={key} /></dd></div>)}</dl>{entries.length > 250 ? <p className="value-limit">Showing the first 250 of {entries.length} display-safe fields.</p> : null}</>;
-  }
-  const safe = redactForDisplay(value, label);
-  return <span className={safe === "[Protected]" ? "protected-value" : "scalar-value"}>{scalar(safe)}</span>;
-}
-
-function ApprovalPanel({
-  challenge,
-  approving,
-  latchStatus,
-  blockedByOtherApproval,
-  canApproveSupervisor,
-  cancelling,
-  online,
-  onApprove,
-  onCancel,
-}: {
-  challenge: ApprovalChallenge;
-  approving: boolean;
-  latchStatus: ApprovalLatch["status"] | null;
-  blockedByOtherApproval: boolean;
-  canApproveSupervisor: boolean;
-  cancelling: boolean;
-  online: boolean;
-  onApprove(): void;
-  onCancel(): void;
-}): ReactNode {
-  const [confirmedChallengeId, setConfirmedChallengeId] = useState<string | null>(null);
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [challenge.challengeId]);
-  const expiry = new Date(challenge.expiresAt).getTime();
-  const remaining = Math.max(0, Math.ceil((expiry - now) / 1_000));
-  const expired = !Number.isFinite(expiry) || remaining === 0;
-  const supervisor = challenge.requirement === "supervisor_confirmation";
-  const authorized = !supervisor || canApproveSupervisor;
-  const reviewable = challenge.summary.length > 0 && challenge.summary.every((item) => item.reviewable);
-  const confirmed = confirmedChallengeId === challenge.challengeId;
-  return (
-    <section className="approval-card" aria-labelledby="approval-title">
-      <div className="approval-heading"><span className="approval-icon" aria-hidden="true">!</span><div><p className="eyebrow">Execution paused safely</p><h3 id="approval-title">{challenge.stepTitle}</h3></div><span className={`expiry${expired ? " expired" : ""}`}>{expired ? "Expired" : `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`}</span></div>
-      <p>{supervisor && !authorized ? "This run cannot switch identity mid-flight. A console supervisor must establish a supervisor target session and start a new run from the beginning." : reviewable ? "Review the exact prepared values. Approval is bound to this run and expires automatically." : "Approval remains blocked because the service did not provide a complete, authorized review projection."}</p>
-      {challenge.summary.length ? (
-        <dl className="approval-summary">{challenge.summary.map((item) => <div key={item.targetId}><dt>{humanize(item.targetId)}</dt><dd>{item.reviewable ? <ValueView value={item.value} /> : <span className="protected-value">Protected value</span>}</dd></div>)}</dl>
-      ) : <p className="muted">The target review checkpoint is ready. No display-safe summary values were returned.</p>}
-      {!authorized ? <Alert tone="warning" title="Supervisor restart required">This run remains stopped. Do not retry it as a teller; a separately authenticated supervisor must start a new run with a supervisor target session.</Alert> : (
-        <>
-          {!reviewable ? <Alert tone="info" title="Review details required">Refresh the run or ask an administrator to restore its authorized display projection. Credentials must never be entered to unblock it.</Alert> : null}
-          {latchStatus ? <Alert tone={latchStatus === "accepted" ? "positive" : "warning"} title={latchStatus === "accepted" ? "Approval accepted" : "Approval status is being reconciled"}>{latchStatus === "accepted" ? "The bound request was accepted. Approval remains locked until the run advances beyond this exact challenge." : "Do not approve again. The console is checking whether the prior request reached the service."}</Alert> : null}
-          {blockedByOtherApproval ? <Alert tone="warning" title="Another approval is being reconciled">Wait until the prior approval reaches a definitive run state before authorizing another operation.</Alert> : null}
-          <label className="confirmation-check"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmedChallengeId(event.target.checked ? challenge.challengeId : null)} disabled={!reviewable || expired || approving || Boolean(latchStatus) || blockedByOtherApproval} /><span>I reviewed these details and authorize this one operation.</span></label>
-          <button className="button approval-button" type="button" disabled={!reviewable || !confirmed || expired || approving || Boolean(latchStatus) || blockedByOtherApproval} onClick={onApprove}>{approving ? <><span className="spinner" aria-hidden="true" />Approving…</> : latchStatus ? "Waiting for run to advance…" : blockedByOtherApproval ? "Another approval is pending…" : "Approve and continue"}</button>
-        </>
-      )}
-      <div className="safe-stop-row">
-        <p>{expired ? "This checkpoint expired without posting the operation." : "Cancelling here will not cross the paused commit boundary."}</p>
-        <button className="button quiet cancel-button" type="button" disabled={!online || cancelling || approving || Boolean(latchStatus) || blockedByOtherApproval} onClick={onCancel}>{cancelling ? <><span className="spinner" aria-hidden="true" />Cancelling…</> : "Cancel safely"}</button>
-      </div>
-    </section>
-  );
-}
-
-function PhaseTracker({ run }: { run: RunRecord }): ReactNode {
-  const index = run.phase === "recovering" || run.phase === "awaiting_human" ? 1 : PHASES.indexOf(run.phase as (typeof PHASES)[number]);
-  return (
-    <ol className="phase-tracker" aria-label={`Run phase: ${humanize(run.phase)}`}>
-      {PHASES.map((item, itemIndex) => <li className={itemIndex < index ? "done" : itemIndex === index ? "active" : ""} key={item}><span aria-hidden="true">{itemIndex < index ? "✓" : itemIndex + 1}</span><small>{item === "awaiting_approval" ? "Review" : humanize(item)}</small></li>)}
-    </ol>
-  );
-}
-
-function Timeline({ run, liveEvents }: { run: RunRecord; liveEvents: LiveEvent[] }): ReactNode {
-  if (run.journal.length === 0 && liveEvents.length === 0) return <EmptyState icon="·" title="Waiting for the first step" detail="The deterministic runner will report each meaningful state transition here." />;
-  return (
-    <ol className="timeline">
-      {run.journal.map((entry) => (
-        <li key={`journal-${entry.sequence}-${entry.attempt}`} className={`timeline-${entry.status}`}>
-          <span className="timeline-marker" aria-hidden="true">{entry.status === "succeeded" ? "✓" : entry.status === "failed" ? "!" : "·"}</span>
-          <div className="timeline-copy"><div><strong>{entry.title}<span className="visually-hidden"> — {humanize(entry.status)}</span></strong><time dateTime={entry.startedAt}>{formatDate(entry.completedAt ?? entry.startedAt)}</time></div><p>{entry.summary ?? `${humanize(entry.action)} · ${humanize(entry.effect)}`}</p>{entry.attempt > 1 ? <span className="attempt">Attempt {entry.attempt}</span> : null}</div>
-        </li>
-      ))}
-      {liveEvents.map((event) => (
-        <li key={`live-${event.id}`} className={`timeline-live timeline-${event.tone}`}>
-          <span className="timeline-marker" aria-hidden="true">{event.tone === "positive" ? "✓" : event.tone === "critical" ? "!" : "·"}</span>
-          <div className="timeline-copy"><div><strong>{event.title}<span className="visually-hidden"> — {humanize(event.tone)}</span></strong><time dateTime={event.timestamp}>{formatDate(event.timestamp)}</time></div>{event.summary ? <p>{event.summary}</p> : null}</div>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function Outcome({ run }: { run: RunRecord }): ReactNode {
-  if (!run.terminalStatus) return null;
-  if (run.terminalStatus === "success") return <Alert tone="positive" title="Run completed">The approved capability reached its verified checkpoint.</Alert>;
-  if (run.effectUncertain) return <Alert title="Commit outcome is unknown">Do not retry this operation. Reconcile it with the target system before taking another action.</Alert>;
-  const tone = run.terminalStatus === "business_outcome" ? "warning" : "critical";
-  const title = run.terminalStatus === "business_outcome" ? "Action needs different information" : run.terminalStatus === "escalation" ? "Human attention required" : "Run stopped safely";
-  return <Alert tone={tone} title={title}><p>{run.message ?? "The run ended without changing any further target state."}</p>{run.code ? <code className="error-code">{run.code}</code> : null}</Alert>;
-}
-
-function RunPanel({
-  run,
-  capability,
-  connection,
-  liveEvents,
-  loading,
-  approving,
-  approvalLatch,
-  canApproveSupervisor,
-  cancelling,
-  online,
-  onUnauthorized,
-  onUnavailable,
-  onRefresh,
-  onApprove,
-  onCancel,
-}: {
-  run: RunRecord | undefined;
-  capability: Capability | undefined;
-  connection: ConnectionState;
-  liveEvents: LiveEvent[];
-  loading: boolean;
-  approving: boolean;
-  approvalLatch: ApprovalLatch | null;
-  canApproveSupervisor: boolean;
-  cancelling: boolean;
-  online: boolean;
-  onUnauthorized(): void;
-  onUnavailable(runId: string): void;
-  onRefresh(): void;
-  onApprove(): void;
-  onCancel(): void;
-}): ReactNode {
-  const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
-  const [evidenceFinalized, setEvidenceFinalized] = useState(false);
-  const [evidenceRunId, setEvidenceRunId] = useState("");
-  const [evidenceRefresh, setEvidenceRefresh] = useState(0);
-  const [evidenceLoading, setEvidenceLoading] = useState(false);
-  const [evidenceError, setEvidenceError] = useState("");
-  useEffect(() => {
-    setEvidence([]);
-    setEvidenceFinalized(false);
-    setEvidenceRunId(run?.id ?? "");
-    setEvidenceError("");
-    if (!run || run.phase !== "completed") {
-      setEvidenceLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    setEvidenceLoading(true);
-    void getEvidence(run.id, controller.signal)
-      .then((listing) => {
-        if (!controller.signal.aborted) {
-          setEvidence(listing.items);
-          setEvidenceFinalized(listing.finalized);
-        }
-      })
-      .catch((error) => {
-        if (controller.signal.aborted) return;
-        if (error instanceof ApiError && error.status === 401) {
-          onUnauthorized();
-          return;
-        }
-        if (error instanceof ApiError && error.status === 404 && error.code === "RUN_NOT_FOUND") {
-          onUnavailable(run.id);
-          return;
-        }
-        setEvidenceError(errorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setEvidenceLoading(false);
-      });
-    return () => controller.abort();
-  }, [run?.id, run?.phase, evidenceRefresh, onUnauthorized, onUnavailable]);
-  const evidenceMatchesRun = evidenceRunId === run?.id;
-  const visibleEvidence = evidenceMatchesRun ? evidence : [];
-  const visibleEvidenceFinalized = evidenceMatchesRun && evidenceFinalized;
-  const visibleEvidenceLoading = !evidenceMatchesRun || evidenceLoading;
-  const visibleEvidenceError = evidenceMatchesRun ? evidenceError : "";
-  const snapshotEvidenceStatus = run ? evidenceFinalizationStatus(run) : undefined;
-  const evidenceReady = visibleEvidenceFinalized &&
-    (snapshotEvidenceStatus === undefined || snapshotEvidenceStatus === "complete");
-  const displayOutputs = useMemo(
-    () => run?.outputsDisplaySafe === true ? contractValues(run.outputs, capability?.outputs) : undefined,
-    [run?.outputsDisplaySafe, run?.outputs, capability?.outputs],
-  );
-  const displayInputs = useMemo(
-    () => contractValues(run?.inputs, capability?.inputs),
-    [run?.inputs, capability?.inputs],
-  );
-  return (
-    <section className="panel activity-panel" aria-labelledby="activity-title">
-      <div className="panel-heading activity-heading">
-        <div><p className="eyebrow">Runtime monitor</p><h2 id="activity-title">Live activity</h2></div>
-        <ConnectionBadge state={connection} />
-      </div>
-      {loading ? <LoadingRows count={5} /> : null}
-      {!loading && !run ? <EmptyState icon="◎" title="No run selected" detail="Start an operation or choose one from run history to inspect its progress." /> : null}
-      {!loading && run ? (
-        <div className="run-detail">
-          <div className="run-identity"><div><span className={`status-orb status-${run.terminalStatus ?? run.phase}`} aria-hidden="true" /><div><strong>{capability?.name ?? humanize(run.capabilityId)}</strong><span>Run {shortId(run.id)}</span></div></div><button className="icon-button" type="button" aria-label="Refresh run" title="Refresh run" onClick={onRefresh}>↻</button></div>
-          <PhaseTracker run={run} />
-          {run.phase === "queued" ? <div className="safe-stop-row queued-stop"><p>This request has not entered a browser step and can be removed safely.</p><button className="button quiet cancel-button" type="button" disabled={!online || cancelling} onClick={onCancel}>{cancelling ? <><span className="spinner" aria-hidden="true" />Cancelling…</> : "Cancel queued run"}</button></div> : null}
-          {run.phase === "recovering" ? <Alert tone="warning" title="Safe recovery in progress">The runner detected a recoverable target state and is restarting only from an approved checkpoint.</Alert> : null}
-          {run.phase === "awaiting_human" ? <Alert tone="warning" title="Human handoff requested">Automation is paused and no further actions will run until control is reconciled.</Alert> : null}
-          <Outcome run={run} />
-          {run.phase === "awaiting_approval" && run.challenge ? <ApprovalPanel challenge={run.challenge} approving={approving} latchStatus={approvalLatch?.runId === run.id && approvalLatch.challengeId === run.challenge.challengeId ? approvalLatch.status : null} blockedByOtherApproval={Boolean(approvalLatch && (approvalLatch.runId !== run.id || approvalLatch.challengeId !== run.challenge.challengeId))} canApproveSupervisor={canApproveSupervisor} cancelling={cancelling} online={online} onApprove={onApprove} onCancel={onCancel} /> : null}
-          {run.incidents.length ? <section className="incidents" aria-labelledby="incidents-title"><h3 id="incidents-title">Incidents & recovery</h3>{run.incidents.map((incident, index) => <div className={`incident incident-${incident.category}`} key={`${incident.code}-${index}`}><span aria-hidden="true">{incident.category === "recoverable" ? "↻" : "!"}</span><div><strong>{humanize(incident.code)}</strong><p>{incident.message}</p>{incident.recoveryAttempt ? <small>Recovery attempt {incident.recoveryAttempt}</small> : null}</div></div>)}</section> : null}
-          <section className="timeline-section" aria-labelledby="timeline-title"><div className="section-heading"><h3 id="timeline-title">Execution timeline</h3><span>{run.journal.length + liveEvents.length} events</span></div><Timeline run={run} liveEvents={liveEvents} /></section>
-          {run.phase === "completed" ? (
-            <section className="evidence-section" aria-labelledby="evidence-title">
-              <div className="section-heading">
-                <h3 id="evidence-title">Run evidence</h3>
-                <div className="section-actions">
-                  <span>{evidenceReady ? `${visibleEvidence.length} files` : snapshotEvidenceStatus === "failed" ? "Finalization failed" : snapshotEvidenceStatus === "not_applicable" ? "Not applicable" : "Not finalized"}</span>
-                  <button className="button quiet small" type="button" disabled={visibleEvidenceLoading} onClick={() => setEvidenceRefresh((current) => current + 1)}>Refresh evidence</button>
-                </div>
-              </div>
-              {visibleEvidenceLoading ? <LoadingRows count={2} /> : null}
-              {!visibleEvidenceLoading && visibleEvidenceError ? <Alert tone="info" title="Evidence unavailable">{visibleEvidenceError}</Alert> : null}
-              {!visibleEvidenceLoading && !visibleEvidenceError && snapshotEvidenceStatus === "failed" ? <Alert title="Evidence finalization failed">Required evidence could not be finalized. Staged files are withheld because no complete manifest can be verified.</Alert> : null}
-              {!visibleEvidenceLoading && !visibleEvidenceError && snapshotEvidenceStatus === "not_applicable" ? <p className="evidence-empty">This manager-only run did not create an evidence bundle.</p> : null}
-              {!visibleEvidenceLoading && !visibleEvidenceError && snapshotEvidenceStatus !== "failed" && snapshotEvidenceStatus !== "not_applicable" && !evidenceReady ? <Alert tone="info" title={snapshotEvidenceStatus === "complete" ? "Final evidence manifest unavailable" : "Evidence is not finalized"}>{snapshotEvidenceStatus === "complete" ? "The run reports completed evidence capture, but the retained manifest could not be verified. Downloads are withheld; refresh to reconcile the listing." : <>The service has not published the final manifest. {visibleEvidence.length ? `${visibleEvidence.length} staged ${visibleEvidence.length === 1 ? "file is" : "files are"} withheld until finalization is confirmed.` : "Capture may still be finishing or may have failed; refresh to reconcile its status."}</>}</Alert> : null}
-              {!visibleEvidenceLoading && !visibleEvidenceError && evidenceReady && visibleEvidence.length === 0 ? <p className="evidence-empty">No retained evidence files were reported for this run.</p> : null}
-              {evidenceReady && visibleEvidence.length ? <ul className="evidence-list">{visibleEvidence.map((item) => { const fileName = item.path.split("/").at(-1) ?? "evidence"; return <li key={item.path}><div><strong>{humanize(fileName)}</strong><span>{item.path} · {formatBytes(item.bytes)}</span></div><a className="button quiet small" href={evidenceUrl(run.id, item.path)} download={fileName} rel="noopener">Download</a></li>; })}</ul> : null}
-              <p className="evidence-note">Only manifest-finalized evidence can be downloaded, and it is never embedded in the console.</p>
-            </section>
-          ) : null}
-          {displayOutputs ? <section className="outputs" aria-labelledby="outputs-title"><div className="section-heading"><h3 id="outputs-title">Verified output</h3><span>Contract-filtered result</span></div><ValueView value={displayOutputs} label="Run output" /></section> : null}
-          {run.outputs && !displayOutputs ? <Alert tone="info" title="Output withheld">The service did not mark this result as safe for display under the approved output contract, so the console will not render its values.</Alert> : null}
-          {displayInputs ? <details className="input-envelope"><summary>Submitted input envelope</summary><p>Only contract-declared, display-safe fields are shown.</p><ValueView value={displayInputs} label="Submitted inputs" /></details> : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
 function RunHistory({ runs, capabilities, activeId, loading, error, onSelect, onRetry }: { runs: RunRecord[]; capabilities: Capability[]; activeId: string; loading: boolean; error: string; onSelect(run: RunRecord): void; onRetry(): void }): ReactNode {
   const name = (run: RunRecord) => capabilities.find((item) => item.id === run.capabilityId && (!run.capabilityVersion || item.version === run.capabilityVersion))?.name ?? humanize(run.capabilityId);
   return (
@@ -932,31 +646,6 @@ function RunHistory({ runs, capabilities, activeId, loading, error, onSelect, on
       <div className="history-list">
         {runs.map((run) => <button key={run.id} type="button" aria-pressed={activeId === run.id} className={`history-row${activeId === run.id ? " selected" : ""}`} onClick={() => onSelect(run)}><span className={`status-orb status-${run.terminalStatus ?? run.phase}`} aria-hidden="true" /><span className="history-name"><strong>{name(run)}</strong><small>{shortId(run.id)} · {formatDate(runTimestamp(run))}</small></span><span className="history-state" aria-hidden="true">{humanize(run.terminalStatus ?? run.phase)}</span><span className="visually-hidden">Status: {humanize(run.terminalStatus ?? run.phase)}.</span><span aria-hidden="true">›</span></button>)}
       </div>
-    </section>
-  );
-}
-
-function ChatPanel({ messages, draft, sending, error, online, onDraft, onSend, onCancel, onApply }: { messages: ChatMessage[]; draft: string; sending: boolean; error: string; online: boolean; onDraft(value: string): void; onSend(): void; onCancel(): void; onApply(message: ChatMessage): void }): ReactNode {
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: preferredScrollBehavior() });
-  }, [messages]);
-  return (
-    <section className="panel assistant-panel" aria-labelledby="assistant-title">
-      <div className="panel-heading"><div><p className="eyebrow">Model-routed · server guarded</p><h2 id="assistant-title">Operations assistant</h2></div><span className="assistant-spark" aria-hidden="true">✦</span></div>
-      <div className="assistant-safety"><span aria-hidden="true">◆</span><p><strong>Keep credentials out of chat.</strong> Passwords, tokens, and sign-in details are resolved only by the service.</p></div>
-      <div className="message-log" role="log" aria-live="polite" ref={logRef}>
-        {messages.length === 0 ? <div className="assistant-welcome"><span aria-hidden="true">✦</span><h3>How can I help?</h3><p>Describe the outcome you need. The assistant can find an approved capability and prepare its inputs, but it cannot approve or bypass a safety gate.</p><div className="suggestions">{["Show available read capabilities", "How do approvals work?", "Prepare a member balance lookup"].map((suggestion) => <button type="button" key={suggestion} onClick={() => onDraft(suggestion)}>{suggestion}</button>)}</div></div> : null}
-        {messages.map((message) => <article className={`message message-${message.role}`} key={message.id}><span>{message.role === "assistant" ? "Bridge" : "You"}</span><p>{message.text}</p>{message.routing?.fallbackFrom ? <p className="routing-note" role="status">Degraded routing: {humanize(message.routing.provider)} handled this response because {humanize(message.routing.fallbackFrom)} was unavailable.</p> : null}{message.proposal ? <button className="button quiet small" type="button" onClick={() => onApply(message)}>Review capability request <span aria-hidden="true">→</span></button> : null}<time dateTime={message.createdAt}>{formatDate(message.createdAt)}</time></article>)}
-        {sending ? <div className="thinking" role="status"><span /><span /><span /><span className="visually-hidden">Assistant is thinking</span></div> : null}
-      </div>
-      {error ? <p className="chat-error" role="alert"><span aria-hidden="true">!</span>{error}</p> : null}
-      <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); onSend(); }}>
-        <label className="visually-hidden" htmlFor="assistant-message">Message the operations assistant</label>
-        <textarea id="assistant-message" value={draft} maxLength={8_000} rows={3} placeholder="Describe an operation — never include passwords or tokens" onChange={(event) => onDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onSend(); } }} />
-        <div><small>{draft.length.toLocaleString()} / 8,000</small>{sending ? <button className="button quiet small chat-cancel-button" type="button" onClick={onCancel}>Cancel request</button> : <button className="send-button" type="submit" disabled={!draft.trim() || !online} aria-label="Send message">↑</button>}</div>
-      </form>
-      <p className="assistant-footnote">Suggestions are reviewed locally before a deterministic run begins.</p>
     </section>
   );
 }
@@ -990,44 +679,6 @@ function AuthGate({ loading, error, online, onLogin }: { loading: boolean; error
   );
 }
 
-function SecureSessionPanel({
-  principal,
-  session,
-  profile,
-  branch,
-  connecting,
-  online,
-  onProfile,
-  onBranch,
-  onConnect,
-}: {
-  principal: ConsolePrincipal;
-  session: OperatorSession | null;
-  profile: "teller" | "supervisor";
-  branch: OperatorSession["branch"];
-  connecting: boolean;
-  online: boolean;
-  onProfile(value: "teller" | "supervisor"): void;
-  onBranch(value: OperatorSession["branch"]): void;
-  onConnect(): void;
-}): ReactNode {
-  const active = session?.status === "active";
-  const provisioning = session?.status === "provisioning";
-  return (
-    <section className={`session-panel session-${session?.status ?? "idle"}`} aria-labelledby="session-title">
-      <div className="session-copy">
-        <span className="session-icon" aria-hidden="true">◆</span>
-        <div><p className="eyebrow">Server-managed target access</p><h2 id="session-title">Secure MERIDIAN session</h2><span className="console-identity">Console identity: {principal.displayName} · {humanize(principal.role)}</span><p>{active ? `${humanize(session.profile)} session active at ${session.branch}. Sign out to establish a different target session.` : provisioning ? "Signing on with the server-managed credential profile. Runs remain disabled until verification succeeds." : session?.status === "failed" ? session.message ?? "The target session could not be established." : "Choose an authorized role and branch. The server supplies target credentials outside the browser."}</p></div>
-      </div>
-      <div className="session-controls">
-        <label>Role<select value={profile} disabled={active || connecting || provisioning} onChange={(event) => onProfile(event.target.value as "teller" | "supervisor")}><option value="teller">Teller</option>{principal.role === "supervisor" ? <option value="supervisor">Supervisor</option> : null}</select></label>
-        <label>Branch<select value={branch} disabled={active || connecting || provisioning} onChange={(event) => onBranch(event.target.value as OperatorSession["branch"])}><option value="MAIN-001">Main 001</option><option value="WEST-014">West 014</option><option value="EAST-022">East 022</option></select></label>
-        <button className="button session-button" type="button" disabled={active || !online || connecting || provisioning || (profile === "supervisor" && principal.role !== "supervisor")} onClick={onConnect}>{connecting || provisioning ? <><span className="spinner" aria-hidden="true" />Connecting…</> : active ? "Session active" : "Connect session"}</button>
-      </div>
-    </section>
-  );
-}
-
 export default function App(): ReactNode {
   const online = useOnline();
   const [principal, setPrincipal] = useState<ConsolePrincipal | null>(null);
@@ -1039,15 +690,20 @@ export default function App(): ReactNode {
   const [sessionBranch, setSessionBranch] = useState<OperatorSession["branch"]>("MAIN-001");
   const [sessionConnecting, setSessionConnecting] = useState(false);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [discoveryRuns, setDiscoveryRuns] = useState<DiscoveryRunRecord[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const [activeRunId, setActiveRunId] = useState("");
+  const [activeDiscoveryRunId, setActiveDiscoveryRunId] = useState("");
   const [view, setView] = useState<"workspace" | "runs">("workspace");
+  const [historyKind, setHistoryKind] = useState<"replay" | "discovery">("replay");
   const [side, setSide] = useState<"activity" | "assistant">("activity");
   const [values, setValues] = useState<FlatFormValues>({});
   const [counts, setCounts] = useState<ArrayCounts>({});
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [runsLoading, setRunsLoading] = useState(true);
+  const [discoveryRunsLoading, setDiscoveryRunsLoading] = useState(true);
+  const [discoveryRunLoading, setDiscoveryRunLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -1055,22 +711,30 @@ export default function App(): ReactNode {
   const [approvalLatch, setApprovalLatch] = useState<ApprovalLatch | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [runsError, setRunsError] = useState("");
+  const [discoveryRunsError, setDiscoveryRunsError] = useState("");
   const [actionError, setActionError] = useState<{ title: string; message: string; code: string } | null>(null);
-  const [connection, setConnection] = useState<ConnectionState>("idle");
-  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [lastUpdated, setLastUpdated] = useState("");
   const [toast, setToast] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatSending, setChatSending] = useState(false);
+  const [chatAutomationBusy, setChatAutomationBusy] = useState(false);
   const [chatError, setChatError] = useState("");
+  const [pendingChatLaunch, setPendingChatLaunch] = useState<PendingChatLaunch | null>(null);
   const pendingRunRequests = useRef<Map<string, string>>(new Map());
+  const sessionBootstrapInFlight = useRef(false);
+  const launchInFlight = useRef(false);
+  const chatAutomationInFlight = useRef(false);
+  const chatApprovalAttempts = useRef<Set<string>>(new Set());
+  const sequenceAdvanceInFlight = useRef<Set<string>>(new Set());
   const chatRequestLatch = useRef(new AbortableRequestLatch());
   const cancellingRunRef = useRef("");
   const authGeneration = useRef(0);
   const runMutationEpoch = useRef(0);
   const runListRequest = useRef(0);
   const runDetailRequest = useRef(0);
+  const discoveryListRequest = useRef(0);
+  const discoveryDetailRequest = useRef(0);
   const reconciledTerminalRuns = useRef<Set<string>>(new Set());
   const sidePanelRef = useRef<HTMLDivElement>(null);
   const historyDetailRef = useRef<HTMLDivElement>(null);
@@ -1078,16 +742,20 @@ export default function App(): ReactNode {
 
   const selectedCapability = capabilities.find((item) => capabilityKey(item) === selectedKey);
   const activeRun = runs.find((run) => run.id === activeRunId);
+  const activeDiscoveryRun = discoveryRuns.find((run) => run.id === activeDiscoveryRunId);
+  const activeDiscoveryCapability = activeDiscoveryRun
+    ? capabilities.find((capability) => capability.id === activeDiscoveryRun.capabilityId && capability.version === activeDiscoveryRun.capabilityVersion)
+    : undefined;
   const activeCapability = activeRun
     ? capabilities.find((item) =>
         item.contractValid &&
         item.id === activeRun.capabilityId &&
         item.version === activeRun.capabilityVersion &&
-        item.digest === activeRun.artifactDigest,
+        item.digest === activeRun.artifactDigest &&
+        item.targetProfileDigest === activeRun.targetProfileDigest,
       )
     : undefined;
   const sessionReady = operatorSession?.status === "active" && !sessionConnecting;
-  const supervisorReady = principal?.role === "supervisor" && sessionReady && operatorSession.profile === "supervisor";
   const signOutBlocked = runs.some((run) => run.phase === "running" || run.phase === "recovering");
   const revealRegion = (element: HTMLElement): void => {
     const bounds = element.getBoundingClientRect();
@@ -1107,8 +775,10 @@ export default function App(): ReactNode {
     cancellingRunRef.current = "";
     setOperatorSession(null);
     setRuns([]);
+    setDiscoveryRuns([]);
     setCapabilities([]);
     setActiveRunId("");
+    setActiveDiscoveryRunId("");
     setSelectedKey("");
     setValues({});
     setCounts({});
@@ -1116,13 +786,17 @@ export default function App(): ReactNode {
     setChatDraft("");
     setChatError("");
     setChatSending(false);
-    setLiveEvents([]);
+    setChatAutomationBusy(false);
+    setPendingChatLaunch(null);
     setApprovalLatch(null);
     setActionError(null);
+    setDiscoveryRunsError("");
     setToast("");
     setLastUpdated("");
     setCatalogLoading(false);
     setRunsLoading(false);
+    setDiscoveryRunsLoading(false);
+    setDiscoveryRunLoading(false);
     setRunLoading(false);
     setSubmitting(false);
     setApproving(false);
@@ -1130,13 +804,20 @@ export default function App(): ReactNode {
     setSessionConnecting(false);
     setAuthBusy(false);
     setAuthError("");
-    setConnection("idle");
     setView("workspace");
+    setHistoryKind("replay");
     setSide("activity");
     pendingRunRequests.current.clear();
+    sessionBootstrapInFlight.current = false;
+    launchInFlight.current = false;
+    chatAutomationInFlight.current = false;
+    chatApprovalAttempts.current.clear();
+    sequenceAdvanceInFlight.current.clear();
     runMutationEpoch.current += 1;
     runListRequest.current += 1;
     runDetailRequest.current += 1;
+    discoveryListRequest.current += 1;
+    discoveryDetailRequest.current += 1;
     reconciledTerminalRuns.current.clear();
   }, []);
 
@@ -1223,6 +904,57 @@ export default function App(): ReactNode {
     }
   }, [clearOperatorData]);
 
+  const loadDiscoveryRuns = useCallback(async (signal?: AbortSignal) => {
+    const generation = authGeneration.current;
+    const requestSequence = ++discoveryListRequest.current;
+    setDiscoveryRunsLoading(true);
+    setDiscoveryRunsError("");
+    try {
+      const result = await getDiscoveryRuns(signal);
+      if (generation !== authGeneration.current || requestSequence !== discoveryListRequest.current) return;
+      setDiscoveryRuns(result);
+      setActiveDiscoveryRunId((current) => current && result.some((run) => run.id === current) ? current : result[0]?.id ?? "");
+      setLastUpdated(new Date().toISOString());
+    } catch (error) {
+      if (signal?.aborted || generation !== authGeneration.current) return;
+      if (error instanceof ApiError && error.status === 401) {
+        broadcastAuthChange("expired");
+        clearOperatorData();
+        setPrincipal(null);
+        return;
+      }
+      setDiscoveryRunsError(errorMessage(error));
+    } finally {
+      if (!signal?.aborted && requestSequence === discoveryListRequest.current) setDiscoveryRunsLoading(false);
+    }
+  }, [clearOperatorData]);
+
+  const loadDiscoveryRun = useCallback(async (id: string) => {
+    if (!id) return;
+    const generation = authGeneration.current;
+    const requestSequence = ++discoveryDetailRequest.current;
+    setDiscoveryRunLoading(true);
+    try {
+      const run = await getDiscoveryRun(id);
+      if (generation !== authGeneration.current || requestSequence !== discoveryDetailRequest.current) return;
+      setDiscoveryRuns((current) => current.some((item) => item.id === run.id)
+        ? current.map((item) => item.id === run.id ? run : item)
+        : [...current, run]);
+      setLastUpdated(new Date().toISOString());
+    } catch (error) {
+      if (generation !== authGeneration.current || requestSequence !== discoveryDetailRequest.current) return;
+      if (error instanceof ApiError && error.status === 401) {
+        broadcastAuthChange("expired");
+        clearOperatorData();
+        setPrincipal(null);
+        return;
+      }
+      setActionError({ title: "Discovery details unavailable", message: errorMessage(error), code: errorCode(error) });
+    } finally {
+      if (requestSequence === discoveryDetailRequest.current) setDiscoveryRunLoading(false);
+    }
+  }, [clearOperatorData]);
+
   const loadRuns = useCallback(async (signal?: AbortSignal, silent = false) => {
     const generation = authGeneration.current;
     const mutationEpoch = runMutationEpoch.current;
@@ -1267,8 +999,6 @@ export default function App(): ReactNode {
     setOperatorSession((current) => current?.runId === id
       ? { ...current, status: "failed", message: "The retained sign-on run is no longer available. Reconnect the target session." }
       : current);
-    setLiveEvents([]);
-    setConnection("idle");
   }, []);
 
   const invalidateUnavailableRun = useCallback((id: string) => {
@@ -1304,6 +1034,57 @@ export default function App(): ReactNode {
       if (showLoading && requestSequence === runDetailRequest.current) setRunLoading(false);
     }
   }, [clearOperatorData, invalidateUnavailableRun]);
+
+  const acceptStreamSnapshot = useCallback((run: RunRecord): void => {
+    setRuns((current) => mergeRuns(current, run));
+    setLastUpdated(new Date().toISOString());
+  }, []);
+  const refreshStreamRun = useCallback((runId: string): void => {
+    void loadRun(runId);
+  }, [loadRun]);
+  const { connection, liveEvents } = useRunStream({
+    activeRunId,
+    activeRun,
+    online,
+    authGeneration: authGeneration.current,
+    onSnapshot: acceptStreamSnapshot,
+    onRefresh: refreshStreamRun,
+    onUnauthorized: expireConsole,
+  });
+  const acceptSessionRun = useCallback((run: RunRecord): void => {
+    setRuns((current) => mergeRuns(current, run));
+  }, []);
+  const showSessionToast = useCallback((message: string): void => setToast(message), []);
+  useTargetSessionObserver({
+    session: operatorSession,
+    setSession: setOperatorSession,
+    online,
+    authGeneration: authGeneration.current,
+    onRun: acceptSessionRun,
+    onUnauthorized: expireConsole,
+    onToast: showSessionToast,
+  });
+
+  const acceptHandoffRun = useCallback((run: RunRecord): void => {
+    runMutationEpoch.current += 1;
+    setRuns((current) => mergeRuns(current, run));
+    setActiveRunId(run.id);
+    setSide("activity");
+  }, []);
+  const humanHandoff = useHumanHandoff({
+    run: activeRun,
+    authEpoch: authGeneration.current,
+    onRun: acceptHandoffRun,
+    onUnauthorized: expireConsole,
+  });
+  const acceptReconciliationRun = useCallback((run: RunRecord, focus: boolean): void => {
+    runMutationEpoch.current += 1;
+    setRuns((current) => mergeRuns(current, run));
+    if (focus) {
+      setActiveRunId(run.id);
+      setSide("activity");
+    }
+  }, []);
 
   useEffect(() => {
     if (localConsoleLocked()) {
@@ -1363,13 +1144,15 @@ export default function App(): ReactNode {
     if (!principal) {
       setCatalogLoading(false);
       setRunsLoading(false);
+      setDiscoveryRunsLoading(false);
       return;
     }
     const controller = new AbortController();
     void loadCatalog(controller.signal);
     void loadRuns(controller.signal);
+    void loadDiscoveryRuns(controller.signal);
     return () => controller.abort();
-  }, [principal, loadCatalog, loadRuns]);
+  }, [principal, loadCatalog, loadRuns, loadDiscoveryRuns]);
 
   useEffect(() => {
     if (!principal || !online) return;
@@ -1542,163 +1325,6 @@ export default function App(): ReactNode {
   }, [toast]);
 
   useEffect(() => {
-    setLiveEvents([]);
-    if (!activeRunId || !online || isTerminal(activeRun)) {
-      setConnection("idle");
-      return;
-    }
-    setConnection("connecting");
-    const generation = authGeneration.current;
-    const source = new EventSource(eventsUrl(activeRunId), { withCredentials: true });
-    let highestSequence = 0;
-    let refreshTimer: number | undefined;
-    const scheduleRefresh = () => {
-      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => void loadRun(activeRunId), 180);
-    };
-    const receive = (event: MessageEvent<string>) => {
-      if (generation !== authGeneration.current) return;
-      let payload: unknown;
-      try { payload = JSON.parse(event.data) as unknown; } catch { return; }
-      const envelope = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
-      const runEnvelope = envelope.run && typeof envelope.run === "object" && !Array.isArray(envelope.run) ? envelope.run as Record<string, unknown> : {};
-      const reportedRun = typeof runEnvelope.id === "string" ? runEnvelope.id : typeof envelope.runId === "string" ? envelope.runId : "";
-      if (reportedRun && reportedRun !== activeRunId) return;
-      const sequence = typeof envelope.sequence === "number" ? envelope.sequence : Number(event.lastEventId || 0);
-      if (sequence && sequence <= highestSequence) return;
-      highestSequence = Math.max(highestSequence, sequence || highestSequence);
-      const live = normalizeLiveEvent(envelope.event ?? payload, event.type || "message", event.lastEventId);
-      setLiveEvents((current) => current.some((item) => item.id === live.id) ? current : [...current, live].slice(-120));
-      const snapshot = normalizeRun(envelope.snapshot);
-      if (snapshot && snapshot.id === activeRunId) {
-        setRuns((current) => mergeRuns(current, snapshot));
-        setLastUpdated(new Date().toISOString());
-      } else {
-        scheduleRefresh();
-      }
-    };
-    source.onopen = () => { setConnection("live"); scheduleRefresh(); };
-    source.onmessage = receive;
-    for (const type of [
-      "run.event",
-      "run.started",
-      "run.submitted",
-      "run.running",
-      "run.recovering",
-      "run.resuming",
-      "run.completed",
-      "run.manager_failed",
-      "run.cancelled",
-      "replay.v2.started",
-      "step.started",
-      "step.succeeded",
-      "step.failed",
-      "approval.requested",
-      "approval.consumed",
-      "approval.accepted",
-      "state.recovering",
-      "state.business_outcome",
-      "state.escalation",
-      "evidence.captured",
-      "replay.v2.finished",
-      "replay.v2.failed",
-    ]) source.addEventListener(type, receive as EventListener);
-    source.addEventListener("auth.expired", () => {
-      source.close();
-      expireConsole();
-    });
-    source.onerror = () => setConnection(navigator.onLine ? "disconnected" : "idle");
-    return () => {
-      source.close();
-      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
-    };
-  }, [activeRunId, activeRun?.phase, online, loadRun, expireConsole]);
-
-  useEffect(() => {
-    if (connection !== "disconnected" || !activeRunId || !online) return;
-    const timer = window.setInterval(() => void loadRun(activeRunId), 6_000);
-    return () => window.clearInterval(timer);
-  }, [connection, activeRunId, online, loadRun]);
-
-  useEffect(() => {
-    if (!operatorSession || operatorSession.status !== "provisioning" || !online) return;
-    let stopped = false;
-    let polling = false;
-    let missingChecks = 0;
-    const check = async () => {
-      if (polling) return;
-      polling = true;
-      const generation = authGeneration.current;
-      try {
-        if (operatorSession.runId) {
-          const run = await getRun(operatorSession.runId);
-          if (stopped || generation !== authGeneration.current) return;
-          setRuns((current) => mergeRuns(current, run));
-          if (run.phase === "completed") {
-            if (run.terminalStatus === "success") {
-              const auth = await getAuthState();
-              if (stopped || generation !== authGeneration.current) return;
-              if (!auth) {
-                broadcastAuthChange("expired");
-                clearOperatorData();
-                setPrincipal(null);
-                return;
-              }
-              const target = auth?.meridianSession;
-              if (target?.status === "active" && target.profile === operatorSession.profile && target.branch === operatorSession.branch) {
-                setOperatorSession((current) => current?.runId === run.id ? { ...current, status: "active" } : current);
-                setToast("Secure target session is active. Capability runs are now enabled.");
-              } else if (target?.status === "active") {
-                setOperatorSession((current) => current?.runId === run.id ? { ...current, status: "failed", message: "The verified target session did not match the requested role and branch." } : current);
-              }
-            } else {
-              setOperatorSession((current) => current?.runId === run.id ? { ...current, status: "failed", message: run.message ?? "Secure sign-on did not complete." } : current);
-            }
-          }
-        } else {
-          const auth = await getAuthState();
-          if (stopped || generation !== authGeneration.current) return;
-          if (!auth) {
-            broadcastAuthChange("expired");
-            clearOperatorData();
-            setPrincipal(null);
-          } else if (!auth.meridianSession) {
-            missingChecks += 1;
-            if (missingChecks >= 3) {
-              setOperatorSession((current) => current ? { ...current, status: "failed", message: "The target session is not active on the service." } : current);
-            }
-          } else if (auth.meridianSession.status === "active" && auth.meridianSession.profile && auth.meridianSession.branch) {
-            missingChecks = 0;
-            if (auth.meridianSession.profile === operatorSession.profile && auth.meridianSession.branch === operatorSession.branch) {
-              setOperatorSession({ profile: auth.meridianSession.profile, branch: auth.meridianSession.branch, status: "active" });
-              setToast("Secure target session is active. Capability runs are now enabled.");
-            } else {
-              setOperatorSession((current) => current ? { ...current, status: "failed", message: "The verified target session did not match the requested role and branch." } : current);
-            }
-          } else {
-            missingChecks = 0;
-          }
-        }
-      } catch (error) {
-        if (generation !== authGeneration.current) return;
-        if (!stopped && error instanceof ApiError && error.status === 401) {
-          broadcastAuthChange("expired");
-          clearOperatorData();
-          setPrincipal(null);
-        }
-      } finally {
-        polling = false;
-      }
-    };
-    void check();
-    const timer = window.setInterval(() => void check(), 2_000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [operatorSession?.runId, operatorSession?.status, operatorSession?.profile, operatorSession?.branch, online, clearOperatorData]);
-
-  useEffect(() => {
     if (!approvalLatch || !online) return;
     let stopped = false;
     let polling = false;
@@ -1814,92 +1440,196 @@ export default function App(): ReactNode {
     }
   };
 
-  const connectTargetSession = async () => {
-    if (!principal || sessionConnecting || !online) return;
-    if (sessionProfile === "supervisor" && principal.role !== "supervisor") {
-      setActionError({ title: "Supervisor access required", message: "This console identity cannot establish a supervisor target session.", code: "ROLE_REQUIRED" });
-      return;
+  const setChatExecution = (messageId: string, execution: ChatExecution): void => {
+    setMessages((current) => current.map((message) => message.id === messageId ? { ...message, execution } : message));
+  };
+
+  const setChatApproval = (messageId: string, approval: NonNullable<ChatExecution["approval"]>): void => {
+    setMessages((current) => current.map((message) =>
+      message.id === messageId && message.execution
+        ? { ...message, execution: { ...message.execution, approval } }
+        : message,
+    ));
+  };
+
+  const updateSequenceExecution = (
+    messageId: string,
+    update: (execution: ChatSequenceExecution) => ChatSequenceExecution,
+  ): void => {
+    setMessages((current) => current.map((message) =>
+      message.id === messageId && message.sequenceExecution
+        ? { ...message, sequenceExecution: update(message.sequenceExecution) }
+        : message,
+    ));
+  };
+
+  const setSequenceApproval = (
+    messageId: string,
+    stepIndex: number,
+    approval: NonNullable<ChatExecution["approval"]>,
+  ): void => {
+    updateSequenceExecution(messageId, (execution) => {
+      const step = execution.steps[stepIndex];
+      return step ? updateSequenceStep(execution, stepIndex, { ...step, approval }) : execution;
+    });
+  };
+
+  const rejectChatAutomation = (messageId: string, code: string, message: string): void => {
+    setMessages((current) => current.map((item) => {
+      if (item.id !== messageId) return item;
+      if (item.sequenceExecution) {
+        return { ...item, sequenceExecution: { ...item.sequenceExecution, state: "rejected", code, message } };
+      }
+      return { ...item, execution: { state: "rejected", code, message } };
+    }));
+  };
+
+  const connectTargetSession = async (request?: {
+    profile: "teller" | "supervisor";
+    branch: OperatorSession["branch"];
+    keepAssistant: boolean;
+    chatMessageId: string;
+  }): Promise<boolean> => {
+    const profile = request?.profile ?? sessionProfile;
+    const branch = request?.branch ?? sessionBranch;
+    if (!principal || !online) return false;
+    if (sessionBootstrapInFlight.current || sessionConnecting) {
+      if (request) {
+        rejectChatAutomation(request.chatMessageId, "SESSION_BOOTSTRAP_BUSY", "Another target-session bootstrap is already in flight, so this request was not attached or started.");
+      }
+      return false;
     }
+    if (profile === "supervisor" && principal.role !== "supervisor") {
+      const message = "This console identity cannot establish a supervisor target session.";
+      if (request) rejectChatAutomation(request.chatMessageId, "ROLE_REQUIRED", message);
+      else setActionError({ title: "Supervisor access required", message, code: "ROLE_REQUIRED" });
+      return false;
+    }
+    sessionBootstrapInFlight.current = true;
     setSessionConnecting(true);
     setActionError(null);
     const generation = authGeneration.current;
     try {
-      const created = await createSession(sessionProfile, sessionBranch);
-      if (generation !== authGeneration.current) return;
+      const created = await createSession(profile, branch);
+      if (generation !== authGeneration.current) return false;
       const status: OperatorSession["status"] = created.run.phase === "completed" && created.run.terminalStatus !== "success"
         ? "failed"
         : "provisioning";
       setOperatorSession({
         runId: created.run.id,
-        profile: sessionProfile,
-        branch: sessionBranch,
+        profile,
+        branch,
         status,
         ...(status === "failed" ? { message: created.run.message ?? "Secure sign-on did not complete." } : {}),
       });
       runMutationEpoch.current += 1;
       setRuns((current) => mergeRuns(current, created.run));
       setActiveRunId(created.run.id);
-      setSide("activity");
-      setToast("Secure sign-on queued. Runs remain disabled until the owned target session is independently verified.");
+      setSide(request?.keepAssistant ? "assistant" : "activity");
+      setToast(request ? "Secure sign-on queued for the validated assistant operation." : "Secure sign-on queued. Runs remain disabled until the owned target session is independently verified.");
+      if (status === "failed" && request) {
+        rejectChatAutomation(request.chatMessageId, created.run.code ?? "SESSION_SIGN_ON_FAILED", created.run.message ?? "The secure target session could not be established.");
+      }
+      return status !== "failed";
     } catch (error) {
-      if (generation !== authGeneration.current) return;
+      if (generation !== authGeneration.current) return false;
       if (error instanceof ApiError && error.status === 401) {
         broadcastAuthChange("expired");
         setPrincipal(null);
         clearOperatorData();
-        return;
+        return false;
       }
       const uncertain = error instanceof ApiError &&
         (error.status === 0 || error.status === 408 || error.status >= 500 || error.code === "SESSION_ALREADY_ACTIVE");
       if (uncertain) {
-        setOperatorSession({ profile: sessionProfile, branch: sessionBranch, status: "provisioning" });
+        setOperatorSession({ profile, branch, status: "provisioning" });
       }
-      setActionError({
-        title: uncertain ? "Secure session status not confirmed" : "Secure session unavailable",
-        message: uncertain
-          ? `${errorMessage(error)} Do not retry. The console is reconciling the server-owned session state.`
-          : errorMessage(error),
-        code: errorCode(error),
-      });
+      const message = uncertain
+        ? `${errorMessage(error)} The console is reconciling the server-owned session state before any capability launch.`
+        : errorMessage(error);
+      if (request && !uncertain) {
+        rejectChatAutomation(request.chatMessageId, errorCode(error), message);
+      } else if (!request) {
+        setActionError({
+          title: uncertain ? "Secure session status not confirmed" : "Secure session unavailable",
+          message,
+          code: errorCode(error),
+        });
+      }
+      return uncertain;
     } finally {
+      sessionBootstrapInFlight.current = false;
       if (generation === authGeneration.current) setSessionConnecting(false);
     }
   };
 
-  const start = async (inputs: Record<string, JsonValue>) => {
-    if (!selectedCapability || operatorSession?.status !== "active" || sessionConnecting || submitting || !online) return;
-    if (selectedCapability.risk === "supervisor_only" && !supervisorReady) {
-      setActionError({ title: "Supervisor session required", message: "Authenticate as a supervisor and establish a supervisor target session before starting this operation.", code: "SUPERVISOR_REQUIRED" });
-      return;
+  const launchCapability = async (
+    capability: Capability,
+    inputs: Record<string, JsonValue>,
+    origin: { chatMessageId?: string; keepAssistant?: boolean } = {},
+  ) => {
+    const rejectLaunch = (title: string, message: string, code: string): void => {
+      if (origin.chatMessageId) {
+        setChatExecution(origin.chatMessageId, { state: "rejected", code, message });
+      } else {
+        setActionError({ title, message, code });
+      }
+    };
+    if (!isRunnable(capability)) {
+      rejectLaunch("Capability is not approved", "This exact capability version is no longer approved for launch.", "CAPABILITY_NOT_APPROVED");
+      return "rejected" as const;
+    }
+    if (operatorSession?.status !== "active" || sessionConnecting) {
+      rejectLaunch("Secure session required", "Connect an active MERIDIAN session before starting this operation.", "SESSION_NOT_ACTIVE");
+      return "rejected" as const;
+    }
+    if (!online) {
+      rejectLaunch("Console is offline", "Reconnect the console before starting this operation.", "NETWORK_UNAVAILABLE");
+      return "rejected" as const;
+    }
+    if (capability.risk === "supervisor_only" && !canLaunchCapabilityInSession(capability, principal?.role, operatorSession.profile)) {
+      rejectLaunch("Supervisor session required", "This capability requires either an active supervisor target session or its reviewed same-session supervisor handoff path.", "SUPERVISOR_REQUIRED");
+      return "rejected" as const;
     }
     if (containsProtectedMaterial(inputs)) {
-      setActionError({
-        title: "Protected material blocked",
-        message: "One or more business inputs appear to contain a credential or protected authentication field. Remove it before starting the run.",
-        code: "PROTECTED_INPUT_BLOCKED",
-      });
-      return;
+      rejectLaunch(
+        "Protected material blocked",
+        "One or more business inputs appear to contain a credential or protected authentication field. Remove it before starting the run.",
+        "PROTECTED_INPUT_BLOCKED",
+      );
+      return "rejected" as const;
     }
+    if (launchInFlight.current) {
+      rejectLaunch("Run start already in progress", "Another run request is crossing the idempotent submission boundary. This request was not started.", "RUN_START_IN_PROGRESS");
+      return "rejected" as const;
+    }
+    launchInFlight.current = true;
+    if (origin.chatMessageId) setChatExecution(origin.chatMessageId, { state: "starting" });
     setSubmitting(true);
     setActionError(null);
+    setChatError("");
     const generation = authGeneration.current;
     let fingerprint = "";
     try {
-      fingerprint = await requestFingerprint(selectedCapability, inputs);
+      fingerprint = await requestFingerprint(capability, inputs);
       const retainedKey = pendingRunRequests.current.get(fingerprint);
       if (!retainedKey && pendingRunRequests.current.size >= 20) {
         throw new ApiError(409, "UNRESOLVED_REQUEST_LIMIT", "Twenty run requests still have unconfirmed outcomes. Reconcile run history or sign out before starting another operation.");
       }
       const idempotencyKey = retainedKey ?? crypto.randomUUID();
       pendingRunRequests.current.set(fingerprint, idempotencyKey);
-      const created = await createRun({ capability: selectedCapability, inputs, idempotencyKey });
+      const created = await createRun({ capability, inputs, idempotencyKey });
       if (generation !== authGeneration.current) return;
       runMutationEpoch.current += 1;
       setRuns((current) => mergeRuns(current, created));
       setActiveRunId(created.id);
-      setSide("activity");
-      setToast("Run started with an idempotent request.");
+      if (origin.chatMessageId) {
+        setChatExecution(origin.chatMessageId, { state: "submitted", runId: created.id });
+      }
+      setSide(origin.keepAssistant ? "assistant" : "activity");
+      setToast(origin.chatMessageId ? "Assistant request started as an approved, idempotent run." : "Run started with an idempotent request.");
       pendingRunRequests.current.delete(fingerprint);
+      return "submitted" as const;
     } catch (error) {
       if (generation !== authGeneration.current) return;
       if (error instanceof ApiError && error.status === 401) {
@@ -1917,25 +1647,45 @@ export default function App(): ReactNode {
       if (error instanceof ApiError && error.code === "SESSION_NOT_ACTIVE") {
         setOperatorSession((current) => current ? { ...current, status: "failed", message: "The server reported that this target session is no longer active." } : current);
       }
-      setActionError({
-        title: outcomeUnconfirmed ? "Run status not confirmed" : idempotencyConflict ? "Request binding changed" : "Run did not start",
-        message:
-          outcomeUnconfirmed
-            ? `${errorMessage(error)} If you try again with the same inputs, the console will reuse the original idempotency key.`
-            : idempotencyConflict
-              ? "The service rejected this key because it was already bound to different reviewed details. Inspect run history, then submit again to create a new request identity."
-            : errorMessage(error),
-        code: errorCode(error),
-      });
+      const title = outcomeUnconfirmed ? "Run status not confirmed" : idempotencyConflict ? "Request binding changed" : "Run did not start";
+      const message = outcomeUnconfirmed
+        ? `${errorMessage(error)} Reconcile with the same inputs; the original idempotency key will be reused.`
+        : idempotencyConflict
+          ? "The service rejected this key because it was already bound to different reviewed details. Inspect run history, then submit again to create a new request identity."
+          : errorMessage(error);
+      if (origin.chatMessageId) {
+        setChatExecution(origin.chatMessageId, {
+          state: outcomeUnconfirmed ? "unconfirmed" : "rejected",
+          code: errorCode(error),
+          message,
+        });
+      } else {
+        setActionError({ title, message, code: errorCode(error) });
+      }
+      return outcomeUnconfirmed ? "unconfirmed" as const : "rejected" as const;
     } finally {
+      launchInFlight.current = false;
       if (generation === authGeneration.current) setSubmitting(false);
     }
+  };
+
+  const start = async (inputs: Record<string, JsonValue>) => {
+    if (!selectedCapability) return;
+    await launchCapability(selectedCapability, inputs);
   };
 
   const approve = async () => {
     if (!activeRun?.challenge || approving || approvalLatch) return;
     const runId = activeRun.id;
     const challengeId = activeRun.challenge.challengeId;
+    if (!activeRun.challenge.authorized) {
+      setActionError({
+        title: activeRun.challenge.requirement === "supervisor_confirmation" ? "Supervisor handoff required" : "Approval authority required",
+        message: "The server has not authorized this console identity for the retained target-session checkpoint. No approval was posted.",
+        code: activeRun.challenge.requirement === "supervisor_confirmation" ? "SUPERVISOR_REQUIRED" : "APPROVAL_NOT_AUTHORIZED",
+      });
+      return;
+    }
     if (new Date(activeRun.challenge.expiresAt).getTime() <= Date.now()) {
       setActionError({ title: "Approval expired", message: "Refresh the run to request a new review checkpoint. No action was posted.", code: "APPROVAL_EXPIRED" });
       return;
@@ -2022,6 +1772,7 @@ export default function App(): ReactNode {
   };
 
   const selectRun = (run: RunRecord) => {
+    setHistoryKind("replay");
     setActiveRunId(run.id);
     setSide("activity");
     void loadRun(run.id, true);
@@ -2032,9 +1783,20 @@ export default function App(): ReactNode {
     }
   };
 
+  const selectDiscoveryRun = (run: DiscoveryRunRecord) => {
+    setHistoryKind("discovery");
+    setActiveDiscoveryRunId(run.id);
+    void loadDiscoveryRun(run.id);
+    if (window.matchMedia("(max-width: 980px)").matches) {
+      window.requestAnimationFrame(() => {
+        if (historyDetailRef.current) revealRegion(historyDetailRef.current);
+      });
+    }
+  };
+
   const sendChat = async () => {
     const text = chatDraft.trim();
-    if (!text || chatSending || chatRequestLatch.current.active || !online) return;
+    if (!text || chatSending || chatRequestLatch.current.active || chatAutomationInFlight.current || !online) return;
     if (containsCredentialMaterial(text)) {
       setChatDraft("");
       setChatError("That message appears to contain a credential, so it was cleared and was not sent.");
@@ -2058,9 +1820,19 @@ export default function App(): ReactNode {
         text: response.text,
         createdAt: new Date().toISOString(),
         ...(response.proposal ? { proposal: response.proposal } : {}),
+        ...(response.sequence ? {
+          sequence: response.sequence,
+          sequenceExecution: initialSequenceExecution(response.sequence),
+        } : {}),
         ...(response.routing ? { routing: response.routing } : {}),
       };
       setMessages((current) => [...current, assistant]);
+      if (assistant.proposal || assistant.sequence) {
+        chatAutomationInFlight.current = true;
+        setChatAutomationBusy(true);
+        if (assistant.sequence) await launchSequence(assistant);
+        else await launchProposal(assistant);
+      }
     } catch (error) {
       if (generation !== authGeneration.current) return;
       if (error instanceof ApiError && error.status === 401) {
@@ -2086,34 +1858,602 @@ export default function App(): ReactNode {
     chatRequestLatch.current.cancel("operator_cancelled");
   };
 
-  const applyProposal = (message: ChatMessage) => {
-    if (!message.proposal) return;
-    const capability = capabilities.find(
-      (item) =>
-        item.id === message.proposal!.capabilityId &&
-        item.version === message.proposal!.capabilityVersion &&
-        item.digest === message.proposal!.artifactDigest &&
-        isRunnable(item),
-    );
-    if (!capability) {
-      setChatError("That capability is not currently approved for launch.");
+  const finishChatAutomation = (): void => {
+    chatAutomationInFlight.current = false;
+    setChatAutomationBusy(false);
+    setPendingChatLaunch(null);
+  };
+
+  const stopSequence = (
+    messageId: string,
+    stepIndex: number,
+    code: string,
+    message: string,
+    state: "stopped" | "unconfirmed" | "rejected" = "stopped",
+  ): void => {
+    updateSequenceExecution(messageId, (execution) => {
+      const current = execution.steps[stepIndex];
+      if (!current) return { ...execution, state: "rejected", code: "SEQUENCE_EXECUTION_MISMATCH", message: "The sequence step was no longer current." };
+      return updateSequenceStep(
+        execution,
+        stepIndex,
+        { ...current, state, code, message },
+        state,
+      );
+    });
+    if (state !== "unconfirmed") finishChatAutomation();
+  };
+
+  const launchSequenceStep = async (
+    messageId: string,
+    sequence: ChatSequencePlan,
+    stepIndex: number,
+    selectionIndex?: number,
+  ): Promise<void> => {
+    const step = sequence.steps[stepIndex];
+    if (!step || Date.parse(sequence.expiresAt) <= Date.now()) {
+      stopSequence(messageId, Math.min(stepIndex, sequence.steps.length - 1), "SEQUENCE_NOT_FOUND", "The reviewed sequence expired before this step could start.", "rejected");
       return;
     }
-    const flattened = flattenProposal(capability, message.proposal.arguments);
-    setSelectedKey(capabilityKey(capability));
-    setValues(flattened.values);
-    setCounts(flattened.counts);
-    setView("workspace");
-    setSide("activity");
-    setToast("Assistant proposal loaded for your review. Nothing has run yet.");
-    window.requestAnimationFrame(() => {
-      const firstField = capability.inputs.find((field) => !isProtectedField(field));
-      const target = firstField
-        ? document.getElementById(fieldDomId(fieldPath([firstField.name])))
-        : document.getElementById("guided-operation-panel");
-      if (target) revealRegion(target);
+    const capability = resolveSequenceCapability(capabilities, step);
+    if (!capability) {
+      stopSequence(messageId, stepIndex, "SEQUENCE_STEP_MISMATCH", "This exact capability, artifact digest, or target profile is no longer approved.", "rejected");
+      return;
+    }
+    const prepared = prepareSequenceStepInputs(capability, step.literalArguments, step.bindings.map((binding) => binding.targetInput));
+    const firstError = Object.values(prepared.errors)[0];
+    if (firstError) {
+      stopSequence(messageId, stepIndex, "INVALID_SEQUENCE_INPUT", `The reviewed sequence step no longer passes its exact input contract: ${firstError}`, "rejected");
+      return;
+    }
+    if (operatorSession?.status !== "active" || sessionConnecting || !online) {
+      stopSequence(messageId, stepIndex, "SESSION_NOT_ACTIVE", "The independently verified target session is not active for this sequence step.", "rejected");
+      return;
+    }
+    if (launchInFlight.current) {
+      // A second click/effect cannot cross the single browser submission latch.
+      // The in-flight exact request remains authoritative and will update state.
+      return;
+    }
+    launchInFlight.current = true;
+    setSubmitting(true);
+    setActionError(null);
+    setChatError("");
+    updateSequenceExecution(messageId, (execution) => {
+      const current = execution.steps[stepIndex];
+      if (!current) return execution;
+      const { code: _code, message: _message, ...starting } = current;
+      return updateSequenceStep(execution, stepIndex, { ...starting, state: "starting" }, "running");
     });
+    const generation = authGeneration.current;
+    try {
+      const created = await createRun({
+        capability,
+        inputs: prepared.inputs,
+        sequence: {
+          sequenceId: sequence.sequenceId,
+          stepId: step.stepId,
+          ...(selectionIndex === undefined ? {} : { selectionIndex }),
+        },
+      });
+      if (generation !== authGeneration.current) return;
+      if (!sequenceRunMatchesStep(created, sequence, step, stepIndex)) {
+        throw new ApiError(502, "SEQUENCE_BINDING_MISMATCH", "The returned run did not preserve the exact sequence binding.");
+      }
+      runMutationEpoch.current += 1;
+      setRuns((current) => mergeRuns(current, created));
+      setActiveRunId(created.id);
+      setSelectedKey(capabilityKey(capability));
+      setSide("assistant");
+      updateSequenceExecution(messageId, (execution) => {
+        const current = execution.steps[stepIndex];
+        return current
+          ? updateSequenceStep(execution, stepIndex, { stepId: step.stepId, state: "submitted", runId: created.id }, "running")
+          : execution;
+      });
+      setToast(`Sequence step ${stepIndex + 1} of ${sequence.steps.length} started with server-managed idempotency.`);
+    } catch (error) {
+      if (generation !== authGeneration.current) return;
+      if (error instanceof ApiError && error.status === 401) {
+        expireConsole();
+        return;
+      }
+      if (error instanceof ApiError && error.code === "SESSION_NOT_ACTIVE") {
+        setOperatorSession((current) => current ? { ...current, status: "failed", message: "The server reported that this target session is no longer active." } : current);
+      }
+      if (error instanceof ApiError && error.code === "SEQUENCE_SELECTION_REQUIRED" && selectionIndex === undefined) {
+        const count = typeof error.details?.count === "number" ? error.details.count : 0;
+        const sourceStepId = typeof error.details?.sourceStepId === "string" ? error.details.sourceStepId : "";
+        const sourceCollectionPath = Array.isArray(error.details?.sourceCollectionPath)
+          ? error.details.sourceCollectionPath.filter((segment): segment is string => typeof segment === "string")
+          : [];
+        const bindingMatches = step.bindings.some((binding) =>
+          binding.sourceStepId === sourceStepId &&
+          binding.sourceCollectionPath.join("\u0000") === sourceCollectionPath.join("\u0000"),
+        );
+        if (count > 1 && bindingMatches) {
+          updateSequenceExecution(messageId, (execution) => {
+            const current = execution.steps[stepIndex];
+            if (!current) return execution;
+            return {
+              ...updateSequenceStep(execution, stepIndex, { stepId: step.stepId, state: "selection_required" }, "selection_required"),
+              selection: { stepId: step.stepId, sourceStepId, sourceCollectionPath, count },
+            };
+          });
+          setToast("The sequence paused for an authenticated result selection.");
+          return;
+        }
+      }
+      const uncertain = !(error instanceof ApiError) ||
+        error.status === 0 || error.status === 408 || error.status >= 500 || error.code === "UNKNOWN_OUTCOME";
+      if (uncertain) {
+        stopSequence(messageId, stepIndex, errorCode(error), `${errorMessage(error)} The console is reconciling this server-idempotent step before any continuation.`, "unconfirmed");
+        void loadRuns(undefined, true);
+        return;
+      }
+      stopSequence(
+        messageId,
+        stepIndex,
+        errorCode(error),
+        error instanceof ApiError && error.code === "SEQUENCE_NO_MATCH"
+          ? "The prior step returned no matching row, so the sequence stopped without starting this step."
+          : errorMessage(error),
+        error instanceof ApiError && ["SEQUENCE_NO_MATCH", "SEQUENCE_STOPPED"].includes(error.code) ? "stopped" : "rejected",
+      );
+    } finally {
+      launchInFlight.current = false;
+      if (generation === authGeneration.current) setSubmitting(false);
+    }
   };
+
+  const launchSequence = async (message: ChatMessage): Promise<void> => {
+    const sequence = message.sequence;
+    if (!sequence || !message.sequenceExecution) {
+      finishChatAutomation();
+      return;
+    }
+    const capabilitiesForSteps = sequence.steps.map((step) => resolveSequenceCapability(capabilities, step));
+    if (capabilitiesForSteps.some((capability) => !capability)) {
+      rejectChatAutomation(message.id, "SEQUENCE_STEP_MISMATCH", "One or more exact sequence capabilities are no longer approved for this target profile.");
+      finishChatAutomation();
+      return;
+    }
+    for (let index = 0; index < sequence.steps.length; index += 1) {
+      const step = sequence.steps[index]!;
+      const prepared = prepareSequenceStepInputs(capabilitiesForSteps[index]!, step.literalArguments, step.bindings.map((binding) => binding.targetInput));
+      if (Object.keys(prepared.errors).length > 0) {
+        stopSequence(message.id, index, "INVALID_SEQUENCE_INPUT", "A reviewed sequence step no longer passes its exact local contract.", "rejected");
+        return;
+      }
+    }
+    const sequenceCapabilities = capabilitiesForSteps as Capability[];
+    const requiredProfiles = sequenceCapabilities.map((capability) => requiredProfileForCapability(capability, principal?.role));
+    if (requiredProfiles.some((profile) => profile === null)) {
+      rejectChatAutomation(message.id, "SUPERVISOR_REQUIRED", "This sequence contains a supervisor-only capability without a reviewed teller-to-supervisor handoff path.");
+      finishChatAutomation();
+      return;
+    }
+    const requiredProfile: "teller" | "supervisor" = requiredProfiles.includes("supervisor") ? "supervisor" : "teller";
+    if (operatorSession?.status === "active") {
+      if (!sequenceCapabilities.every((capability) => canLaunchCapabilityInSession(capability, principal?.role, operatorSession.profile))) {
+        rejectChatAutomation(message.id, "SUPERVISOR_SESSION_REQUIRED", "This sequence requires either a supervisor target session or reviewed same-session handoff support for every supervisor-only step.");
+        finishChatAutomation();
+        return;
+      }
+      await launchSequenceStep(message.id, sequence, 0);
+      return;
+    }
+    const pending: PendingChatSequenceLaunch = {
+      kind: "sequence",
+      messageId: message.id,
+      sequence,
+      profile: requiredProfile,
+      branch: sessionBranch,
+    };
+    updateSequenceExecution(message.id, (execution) => ({ ...execution, state: "connecting" }));
+    setSessionProfile(requiredProfile);
+    setPendingChatLaunch(pending);
+    if (operatorSession?.status === "provisioning" || sessionConnecting) return;
+    const accepted = await connectTargetSession({
+      profile: requiredProfile,
+      branch: sessionBranch,
+      keepAssistant: true,
+      chatMessageId: message.id,
+    });
+    if (!accepted) finishChatAutomation();
+  };
+
+  const launchProposal = async (message: ChatMessage) => {
+    if (!message.proposal) {
+      finishChatAutomation();
+      return;
+    }
+    const capability = resolveProposalCapability(capabilities, message.proposal);
+    if (!capability) {
+      setChatExecution(message.id, {
+        state: "rejected",
+        code: "CAPABILITY_NOT_APPROVED",
+        message: "That exact capability version is not currently approved for launch.",
+      });
+      finishChatAutomation();
+      return;
+    }
+    const prepared = prepareProposalInputs(capability, message.proposal.arguments);
+    const firstError = Object.values(prepared.errors)[0];
+    if (firstError) {
+      setChatExecution(message.id, {
+        state: "rejected",
+        code: "INVALID_PROPOSAL_INPUT",
+        message: `The proposal no longer passes the current local contract: ${firstError}`,
+      });
+      finishChatAutomation();
+      return;
+    }
+    setSelectedKey(capabilityKey(capability));
+    const requiredProfile = requiredProfileForCapability(capability, principal?.role, sessionProfile);
+    if (!requiredProfile) {
+      setChatExecution(message.id, {
+        state: "rejected",
+        code: "SUPERVISOR_REQUIRED",
+        message: "This console identity cannot authorize the supervisor session required by that capability.",
+      });
+      finishChatAutomation();
+      return;
+    }
+    if (operatorSession?.status === "active") {
+      if (!canLaunchCapabilityInSession(capability, principal?.role, operatorSession.profile)) {
+        setChatExecution(message.id, {
+          state: "rejected",
+          code: "SUPERVISOR_SESSION_REQUIRED",
+          message: "This supervisor-only capability has no reviewed same-session handoff path for the active teller session.",
+        });
+        finishChatAutomation();
+        return;
+      }
+      await launchCapability(capability, prepared.inputs, { chatMessageId: message.id, keepAssistant: true });
+      finishChatAutomation();
+      return;
+    }
+    if (operatorSession?.status === "provisioning" || sessionConnecting) {
+      if (operatorSession && (operatorSession.profile !== requiredProfile || operatorSession.branch !== sessionBranch)) {
+        setChatExecution(message.id, {
+          state: "rejected",
+          code: "SESSION_BOOTSTRAP_CONFLICT",
+          message: "A different target session is already being established. No capability run was started.",
+        });
+        finishChatAutomation();
+        return;
+      }
+      setChatExecution(message.id, { state: "connecting" });
+      setPendingChatLaunch({ kind: "proposal", messageId: message.id, proposal: message.proposal, inputs: prepared.inputs, profile: requiredProfile, branch: sessionBranch });
+      return;
+    }
+    const pending: PendingChatLaunch = {
+      kind: "proposal",
+      messageId: message.id,
+      proposal: message.proposal,
+      inputs: prepared.inputs,
+      profile: requiredProfile,
+      branch: sessionBranch,
+    };
+    setSessionProfile(requiredProfile);
+    setChatExecution(message.id, { state: "connecting" });
+    setPendingChatLaunch(pending);
+    const accepted = await connectTargetSession({
+      profile: requiredProfile,
+      branch: sessionBranch,
+      keepAssistant: true,
+      chatMessageId: message.id,
+    });
+    if (!accepted) finishChatAutomation();
+  };
+
+  useEffect(() => {
+    if (!pendingChatLaunch || !online) return;
+    if (operatorSession?.status === "failed") {
+      rejectChatAutomation(pendingChatLaunch.messageId, "SESSION_SIGN_ON_FAILED", operatorSession.message ?? "The authorized target session could not be established, so no capability run was started.");
+      finishChatAutomation();
+      return;
+    }
+    if (operatorSession?.status !== "active") return;
+    if (operatorSession.profile !== pendingChatLaunch.profile || operatorSession.branch !== pendingChatLaunch.branch) {
+      rejectChatAutomation(pendingChatLaunch.messageId, "SESSION_BINDING_MISMATCH", "The verified target session did not match the role and branch bound to this request.");
+      finishChatAutomation();
+      return;
+    }
+    const pending = pendingChatLaunch;
+    setPendingChatLaunch(null);
+    if (pending.kind === "sequence") {
+      const first = pending.sequence.steps[0];
+      if (!first || !resolveSequenceCapability(capabilities, first)) {
+        rejectChatAutomation(pending.messageId, "SEQUENCE_STEP_MISMATCH", "The first sequence capability changed while the target session was being established.");
+        finishChatAutomation();
+        return;
+      }
+      void launchSequenceStep(pending.messageId, pending.sequence, 0);
+      return;
+    }
+    const capability = resolveProposalCapability(capabilities, pending.proposal);
+    if (!capability) {
+      rejectChatAutomation(pending.messageId, "CAPABILITY_NOT_APPROVED", "The capability changed while the target session was being established, so no run was started.");
+      finishChatAutomation();
+      return;
+    }
+    void launchCapability(capability, pending.inputs, { chatMessageId: pending.messageId, keepAssistant: true }).finally(finishChatAutomation);
+  }, [pendingChatLaunch, operatorSession?.status, operatorSession?.profile, operatorSession?.branch, online, capabilities]);
+
+  const continueSequenceSelection = (messageId: string, selectionIndex: number): void => {
+    const message = messages.find((item) => item.id === messageId);
+    const execution = message?.sequenceExecution;
+    const selection = execution?.selection;
+    if (
+      !message?.sequence ||
+      !execution ||
+      execution.state !== "selection_required" ||
+      !selection ||
+      !Number.isSafeInteger(selectionIndex) ||
+      selectionIndex < 0 ||
+      selectionIndex >= selection.count ||
+      message.sequence.steps[execution.currentStepIndex]?.stepId !== selection.stepId
+    ) return;
+    void launchSequenceStep(message.id, message.sequence, execution.currentStepIndex, selectionIndex);
+  };
+
+  useEffect(() => {
+    const candidate = messages.find((message) => {
+      const execution = message.sequenceExecution;
+      if (!message.sequence || !execution || !["running", "unconfirmed"].includes(execution.state)) return false;
+      const stepExecution = execution.steps[execution.currentStepIndex];
+      return stepExecution?.state === "submitted" || stepExecution?.state === "unconfirmed";
+    });
+    if (!candidate?.sequence || !candidate.sequenceExecution) return;
+    const execution = candidate.sequenceExecution;
+    const stepIndex = execution.currentStepIndex;
+    const step = candidate.sequence.steps[stepIndex];
+    const stepExecution = execution.steps[stepIndex];
+    if (!step || !stepExecution) return;
+    const run = stepExecution.runId
+      ? runs.find((item) => item.id === stepExecution.runId)
+      : runs.find((item) => sequenceRunMatchesStep(item, candidate.sequence!, step, stepIndex));
+    if (!run) return;
+    if (!sequenceRunMatchesStep(run, candidate.sequence, step, stepIndex)) {
+      stopSequence(candidate.id, stepIndex, "SEQUENCE_BINDING_MISMATCH", "The observed run no longer matches this exact sequence step.", "rejected");
+      return;
+    }
+    if (!stepExecution.runId) {
+      updateSequenceExecution(candidate.id, (current) => {
+        const currentStep = current.steps[stepIndex];
+        return currentStep
+          ? updateSequenceStep(current, stepIndex, { ...currentStep, state: "submitted", runId: run.id }, "running")
+          : current;
+      });
+      return;
+    }
+    if (run.phase !== "completed") return;
+    const advanceKey = `${candidate.sequence.sequenceId}:${step.stepId}:${run.id}`;
+    if (sequenceAdvanceInFlight.current.has(advanceKey)) return;
+    sequenceAdvanceInFlight.current.add(advanceKey);
+    if (run.terminalStatus !== "success") {
+      stopSequence(
+        candidate.id,
+        stepIndex,
+        run.code ?? "SEQUENCE_STOPPED",
+        run.effectUncertain
+          ? "The sequence stopped because this step's write effect is uncertain. Reconcile the run before any new action."
+          : run.message ?? "The sequence stopped because this step did not complete successfully.",
+      );
+      sequenceAdvanceInFlight.current.delete(advanceKey);
+      return;
+    }
+    updateSequenceExecution(candidate.id, (current) => {
+      const currentStep = current.steps[stepIndex];
+      if (!currentStep) return current;
+      if (stepIndex === candidate.sequence!.steps.length - 1) {
+        return updateSequenceStep(current, stepIndex, { ...currentStep, state: "success" }, "completed");
+      }
+      return updateSequenceStep(current, stepIndex, { ...currentStep, state: "success" }, "running");
+    });
+    if (stepIndex === candidate.sequence.steps.length - 1) {
+      setToast("The approved capability sequence completed successfully.");
+      finishChatAutomation();
+      sequenceAdvanceInFlight.current.delete(advanceKey);
+      return;
+    }
+    void launchSequenceStep(candidate.id, candidate.sequence, stepIndex + 1)
+      .finally(() => sequenceAdvanceInFlight.current.delete(advanceKey));
+  }, [messages, runs, capabilities, online, operatorSession?.status]);
+
+  useEffect(() => {
+    if (!principal || !online || approving || approvalLatch) return;
+    const candidates: ChatApprovalCandidate[] = [];
+    for (const message of messages) {
+      const execution = message.execution;
+      if (message.proposal && execution?.state === "submitted" && execution.runId) {
+        const run = runs.find((item) => item.id === execution.runId);
+        if (run?.challenge && run.phase === "awaiting_approval") {
+          candidates.push({
+            message,
+            binding: {
+              capabilityId: message.proposal.capabilityId,
+              capabilityVersion: message.proposal.capabilityVersion,
+              artifactDigest: message.proposal.artifactDigest,
+              targetProfileDigest: message.proposal.targetProfileDigest,
+              arguments: message.proposal.arguments,
+              boundInputs: [] as string[],
+            },
+            authorizedRunId: execution.runId,
+            run,
+            challenge: run.challenge,
+          });
+          continue;
+        }
+      }
+      const sequenceExecution = message.sequenceExecution;
+      const sequence = message.sequence;
+      if (!sequence || !sequenceExecution) continue;
+      const stepIndex = sequenceExecution.currentStepIndex;
+      const stepExecution = sequenceExecution.steps[stepIndex];
+      const step = sequence.steps[stepIndex];
+      if (stepExecution?.state !== "submitted" || !stepExecution.runId || !step) continue;
+      const run = runs.find((item) => item.id === stepExecution.runId);
+      if (!run?.challenge || run.phase !== "awaiting_approval") continue;
+      candidates.push({
+        message,
+        binding: {
+          capabilityId: step.capabilityId,
+          capabilityVersion: step.capabilityVersion,
+          artifactDigest: step.artifactDigest,
+          targetProfileDigest: step.targetProfileDigest,
+          arguments: step.literalArguments,
+          boundInputs: step.bindings.map((item) => item.targetInput),
+        },
+        authorizedRunId: stepExecution.runId,
+        run,
+        challenge: run.challenge,
+        sequenceStepIndex: stepIndex,
+      });
+    }
+    const candidate = candidates.find(({ run, challenge }) => !chatApprovalAttempts.current.has(`${run.id}:${challenge.challengeId}`));
+    if (!candidate) return;
+
+    const { message, binding, authorizedRunId, run, challenge, sequenceStepIndex } = candidate;
+    const attemptKey = `${run.id}:${challenge.challengeId}`;
+    // Mark before every validation and network boundary. A rejected, malformed,
+    // or uncertain challenge must never become an automatic retry loop.
+    chatApprovalAttempts.current.add(attemptKey);
+    const reject = (code: string, detail: string): void => {
+      const approval = { challengeId: challenge.challengeId, state: "rejected" as const, code, message: detail };
+      if (sequenceStepIndex === undefined) setChatApproval(message.id, approval);
+      else setSequenceApproval(message.id, sequenceStepIndex, approval);
+      setToast("Automatic approval stopped safely. View the run for details.");
+    };
+
+    if (
+      run.id !== authorizedRunId ||
+      challenge.runId !== run.id ||
+      run.capabilityId !== binding.capabilityId ||
+      run.capabilityVersion !== binding.capabilityVersion ||
+      run.artifactDigest !== binding.artifactDigest ||
+      run.targetProfileDigest !== binding.targetProfileDigest
+    ) {
+      reject("CHAT_APPROVAL_BINDING_MISMATCH", "The current run, capability digest, and server challenge do not match the proposal authorized by Send.");
+      return;
+    }
+    if (sequenceStepIndex !== undefined) {
+      const sequenceStep = message.sequence?.steps[sequenceStepIndex];
+      if (!message.sequence || !sequenceStep || !sequenceRunMatchesStep(run, message.sequence, sequenceStep, sequenceStepIndex)) {
+        reject("CHAT_APPROVAL_BINDING_MISMATCH", "The sequence lineage on this approval run does not match the exact step authorized by Send.");
+        return;
+      }
+    }
+    const capability = capabilities.find((item) =>
+      item.id === binding.capabilityId &&
+      item.version === binding.capabilityVersion &&
+      item.digest === binding.artifactDigest &&
+      item.targetProfileDigest === binding.targetProfileDigest &&
+      isRunnable(item),
+    );
+    if (!capability) {
+      reject("CAPABILITY_NOT_APPROVED", "This exact capability version or digest is no longer approved, so the checkpoint was not submitted.");
+      return;
+    }
+    const prepared = sequenceStepIndex === undefined
+      ? prepareProposalInputs(capability, binding.arguments)
+      : prepareSequenceStepInputs(capability, binding.arguments, binding.boundInputs);
+    if (Object.keys(prepared.errors).length > 0) {
+      reject("INVALID_PROPOSAL_INPUT", "The originally authorized proposal no longer passes the current input contract.");
+      return;
+    }
+    if (run.effectUncertain) {
+      reject("RUN_EFFECT_UNCERTAIN", "The run reports an uncertain effect, so no new approval can be authorized automatically.");
+      return;
+    }
+    if (challenge.summary.length === 0 || challenge.summary.some((item) => !item.reviewable)) {
+      reject("APPROVAL_REVIEW_INCOMPLETE", "The service did not provide a complete display-safe review projection for this challenge.");
+      return;
+    }
+    if (new Date(challenge.expiresAt).getTime() <= Date.now()) {
+      reject("APPROVAL_EXPIRED", "The server-issued approval challenge expired before it could be submitted.");
+      return;
+    }
+    if (!challenge.authorized) {
+      reject(challenge.requirement === "supervisor_confirmation" ? "SUPERVISOR_REQUIRED" : "APPROVAL_NOT_AUTHORIZED", "The service has not authorized this console identity for the retained target-session checkpoint.");
+      return;
+    }
+
+    setApproving(true);
+    const submittingApproval = { challengeId: challenge.challengeId, state: "submitting" as const };
+    if (sequenceStepIndex === undefined) setChatApproval(message.id, submittingApproval);
+    else setSequenceApproval(message.id, sequenceStepIndex, submittingApproval);
+    const generation = authGeneration.current;
+    void approveRun(run.id, challenge.challengeId)
+      .then((resumed) => {
+        if (generation !== authGeneration.current) return;
+        if (
+          resumed.id !== run.id ||
+          resumed.capabilityId !== binding.capabilityId ||
+          resumed.capabilityVersion !== binding.capabilityVersion ||
+          resumed.artifactDigest !== binding.artifactDigest ||
+          resumed.targetProfileDigest !== binding.targetProfileDigest
+        ) {
+          throw new ApiError(502, "RUN_BINDING_MISMATCH", "The approval response did not preserve the authorized capability binding.");
+        }
+        if (sequenceStepIndex !== undefined) {
+          const sequenceStep = message.sequence?.steps[sequenceStepIndex];
+          if (!message.sequence || !sequenceStep || !sequenceRunMatchesStep(resumed, message.sequence, sequenceStep, sequenceStepIndex)) {
+            throw new ApiError(502, "SEQUENCE_BINDING_MISMATCH", "The approval response did not preserve the exact sequence lineage.");
+          }
+        }
+        runMutationEpoch.current += 1;
+        setRuns((current) => mergeRuns(current, resumed));
+        setApprovalLatch({ runId: run.id, challengeId: challenge.challengeId, status: "accepted" });
+        const acceptedApproval = { challengeId: challenge.challengeId, state: "accepted" as const };
+        if (sequenceStepIndex === undefined) setChatApproval(message.id, acceptedApproval);
+        else setSequenceApproval(message.id, sequenceStepIndex, acceptedApproval);
+        setToast("The exact server-issued challenge was accepted and is being reconciled.");
+      })
+      .catch((error: unknown) => {
+        if (generation !== authGeneration.current) return;
+        if (error instanceof ApiError && error.status === 401) {
+          broadcastAuthChange("expired");
+          setPrincipal(null);
+          clearOperatorData();
+          return;
+        }
+        const uncertain = !(error instanceof ApiError) ||
+          error.status === 0 || error.status === 408 || error.status >= 500 || error.code === "UNKNOWN_OUTCOME";
+        const code = errorCode(error);
+        const detail = uncertain
+          ? `${errorMessage(error)} No automatic retry will be made; the console is reconciling the same challenge.`
+          : errorMessage(error);
+        const failedApproval = {
+          challengeId: challenge.challengeId,
+          state: uncertain ? "unconfirmed" as const : "rejected" as const,
+          code,
+          message: detail,
+        };
+        if (sequenceStepIndex === undefined) setChatApproval(message.id, failedApproval);
+        else setSequenceApproval(message.id, sequenceStepIndex, failedApproval);
+        if (uncertain) {
+          setApprovalLatch({ runId: run.id, challengeId: challenge.challengeId, status: "unconfirmed" });
+        } else {
+          void loadRun(run.id);
+        }
+      })
+      .finally(() => {
+        if (generation === authGeneration.current) setApproving(false);
+      });
+  }, [
+    messages,
+    runs,
+    capabilities,
+    principal,
+    online,
+    approving,
+    approvalLatch,
+    clearOperatorData,
+    loadRun,
+  ]);
 
   const assistantOpen = view === "workspace" && side === "assistant";
   const openAssistant = () => {
@@ -2139,7 +2479,7 @@ export default function App(): ReactNode {
         <Brand />
         <nav className="primary-nav" aria-label="Primary navigation">
           <button type="button" className={view === "workspace" ? "active" : ""} aria-current={view === "workspace" ? "page" : undefined} onClick={() => setView("workspace")}>Workspace</button>
-          <button type="button" className={view === "runs" ? "active" : ""} aria-current={view === "runs" ? "page" : undefined} onClick={() => setView("runs")}>Run history <span>{runs.length}</span></button>
+          <button type="button" className={view === "runs" ? "active" : ""} aria-current={view === "runs" ? "page" : undefined} onClick={() => setView("runs")}>History <span>{runs.length + discoveryRuns.length}</span></button>
         </nav>
         <div className="top-actions">
           <span className={`service-state${online ? "" : " offline"}`}><span aria-hidden="true" />{online ? "Browser online" : "Browser offline"}</span>
@@ -2158,18 +2498,28 @@ export default function App(): ReactNode {
             <div><dt>Needs review</dt><dd>{runs.filter((run) => run.phase === "awaiting_approval" || run.phase === "awaiting_human").length}</dd></div>
           </dl>
         </section>
-        <SecureSessionPanel principal={principal} session={operatorSession} profile={sessionProfile} branch={sessionBranch} connecting={sessionConnecting} online={online} onProfile={setSessionProfile} onBranch={setSessionBranch} onConnect={() => void connectTargetSession()} />
+        <SecureSessionPanel principal={principal} session={operatorSession} profile={sessionProfile} branch={sessionBranch} connecting={sessionConnecting} online={online} handoff={humanHandoff} onProfile={setSessionProfile} onBranch={setSessionBranch} onConnect={() => void connectTargetSession()} />
         {actionError ? <Alert title={actionError.title} action={<button className="icon-button" type="button" aria-label="Dismiss error" onClick={() => setActionError(null)}>×</button>}><p>{actionError.message}</p><code className="error-code">{actionError.code}</code></Alert> : null}
         {view === "runs" ? (
-          <div className="history-layout"><RunHistory runs={runs} capabilities={capabilities} activeId={activeRunId} loading={runsLoading} error={runsError} onSelect={selectRun} onRetry={() => void loadRuns()} /><div ref={historyDetailRef} tabIndex={-1} role="region" aria-label="Selected run details"><RunPanel run={activeRun} capability={activeCapability} connection={connection} liveEvents={liveEvents} loading={runLoading} approving={approving} approvalLatch={approvalLatch} canApproveSupervisor={supervisorReady} cancelling={cancellingRunId === activeRun?.id} online={online} onUnauthorized={expireConsole} onUnavailable={invalidateUnavailableRun} onRefresh={() => void loadRun(activeRunId, true)} onApprove={() => void approve()} onCancel={() => void cancelActiveRun()} /></div></div>
+          <section className="history-shell" aria-label="Discovery and replay history">
+            <div className="history-kind-tabs" role="tablist" aria-label="History type">
+              <button type="button" role="tab" aria-selected={historyKind === "replay"} className={historyKind === "replay" ? "active" : ""} onClick={() => setHistoryKind("replay")}>Replay runs <span>{runs.length}</span></button>
+              <button type="button" role="tab" aria-selected={historyKind === "discovery"} className={historyKind === "discovery" ? "active" : ""} onClick={() => setHistoryKind("discovery")}>Discovery runs <span>{discoveryRuns.length}</span></button>
+            </div>
+            {historyKind === "replay" ? (
+              <div className="history-layout"><RunHistory runs={runs} capabilities={capabilities} activeId={activeRunId} loading={runsLoading} error={runsError} onSelect={selectRun} onRetry={() => void loadRuns()} /><div ref={historyDetailRef} tabIndex={-1} role="region" aria-label="Selected replay run details"><RunPanel run={activeRun} capability={activeCapability} connection={connection} liveEvents={liveEvents} loading={runLoading} approving={approving} approvalLatch={approvalLatch} cancelling={cancellingRunId === activeRun?.id} online={online} principal={principal} handoff={humanHandoff} onRunUpdate={acceptReconciliationRun} onUnauthorized={expireConsole} onUnavailable={invalidateUnavailableRun} onRefresh={() => void loadRun(activeRunId, true)} onApprove={() => void approve()} onCancel={() => void cancelActiveRun()} /></div></div>
+            ) : (
+              <div className="history-layout"><DiscoveryRunHistory runs={discoveryRuns} activeId={activeDiscoveryRunId} loading={discoveryRunsLoading} error={discoveryRunsError} onSelect={selectDiscoveryRun} onRetry={() => void loadDiscoveryRuns()} /><div ref={historyDetailRef} tabIndex={-1} role="region" aria-label="Selected discovery run details"><DiscoveryRunDetail run={activeDiscoveryRun} capability={activeDiscoveryCapability} loading={discoveryRunLoading} /></div></div>
+            )}
+          </section>
         ) : (
           <div className="workspace-grid">
             <CapabilityCatalog capabilities={capabilities} selectedKey={selectedKey} loading={catalogLoading} error={catalogError} onSelect={chooseCapability} onRetry={() => void loadCatalog()} />
-            <GuidedRunForm capability={selectedCapability} values={values} counts={counts} online={online} sessionReady={sessionReady} riskAuthorized={selectedCapability?.risk !== "supervisor_only" || supervisorReady} submitting={submitting} onValues={setValues} onCounts={setCounts} onSubmit={(inputs) => void start(inputs)} />
+            <GuidedRunForm capability={selectedCapability} values={values} counts={counts} online={online} sessionReady={sessionReady} riskAuthorized={Boolean(selectedCapability && canLaunchCapabilityInSession(selectedCapability, principal?.role, operatorSession?.profile))} submitting={submitting} onValues={setValues} onCounts={setCounts} onSubmit={(inputs) => void start(inputs)} />
             <div className="side-column" ref={sidePanelRef} tabIndex={-1} role="region" aria-label={side === "activity" ? "Live activity panel" : "Operations assistant panel"}>
               <div className="side-tabs" aria-label="Workspace side panel"><button aria-pressed={side === "activity"} className={side === "activity" ? "active" : ""} type="button" onClick={() => setSide("activity")}>Activity</button><button aria-pressed={side === "assistant"} className={side === "assistant" ? "active" : ""} type="button" onClick={() => setSide("assistant")}><span aria-hidden="true">✦</span> Assistant</button></div>
               <div id="workspace-side-panel">
-                {side === "activity" ? <RunPanel run={activeRun} capability={activeCapability} connection={connection} liveEvents={liveEvents} loading={runLoading || runsLoading} approving={approving} approvalLatch={approvalLatch} canApproveSupervisor={supervisorReady} cancelling={cancellingRunId === activeRun?.id} online={online} onUnauthorized={expireConsole} onUnavailable={invalidateUnavailableRun} onRefresh={() => void loadRun(activeRunId, true)} onApprove={() => void approve()} onCancel={() => void cancelActiveRun()} /> : <ChatPanel messages={messages} draft={chatDraft} sending={chatSending} error={chatError} online={online} onDraft={setChatDraft} onSend={() => void sendChat()} onCancel={cancelChat} onApply={applyProposal} />}
+                {side === "activity" ? <RunPanel run={activeRun} capability={activeCapability} connection={connection} liveEvents={liveEvents} loading={runLoading || runsLoading} approving={approving} approvalLatch={approvalLatch} cancelling={cancellingRunId === activeRun?.id} online={online} principal={principal} handoff={humanHandoff} onRunUpdate={acceptReconciliationRun} onUnauthorized={expireConsole} onUnavailable={invalidateUnavailableRun} onRefresh={() => void loadRun(activeRunId, true)} onApprove={() => void approve()} onCancel={() => void cancelActiveRun()} /> : <ChatPanel messages={messages} capabilities={capabilities} runs={runs} activeRunId={activeRunId} connection={connection} draft={chatDraft} sending={chatSending} automationBusy={chatAutomationBusy} error={chatError} online={online} onDraft={setChatDraft} onSend={() => void sendChat()} onCancel={cancelChat} onOpenRun={selectRun} onSelectSequence={continueSequenceSelection} />}
               </div>
             </div>
           </div>

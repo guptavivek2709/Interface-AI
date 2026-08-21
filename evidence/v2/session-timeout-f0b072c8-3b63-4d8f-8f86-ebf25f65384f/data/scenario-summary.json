@@ -1,0 +1,18 @@
+{
+  "scenario": "session-timeout",
+  "status": "verified",
+  "observation": {
+    "status": "awaiting_human",
+    "code": "SESSION_EXPIRED",
+    "capabilityId": "member.get_record_and_balances",
+    "incidentCodes": [
+      "SESSION_EXPIRED"
+    ]
+  },
+  "assertion": {
+    "injectedFault": true,
+    "sameLiveSession": true,
+    "action": "restore_session"
+  },
+  "plannerCallsAllowed": false
+}

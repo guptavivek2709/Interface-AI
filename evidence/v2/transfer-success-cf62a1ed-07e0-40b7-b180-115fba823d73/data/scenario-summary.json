@@ -1,0 +1,27 @@
+{
+  "scenario": "transfer-success",
+  "status": "verified",
+  "observation": {
+    "status": "success",
+    "capabilityId": "funds.transfer",
+    "outputKeys": [
+      "amount",
+      "confirmation",
+      "destination_balance",
+      "destination_balance_before",
+      "posted_at",
+      "source_balance",
+      "source_balance_before"
+    ],
+    "incidentCodes": []
+  },
+  "assertion": {
+    "amountMinorUnits": 100,
+    "exactApproval": true,
+    "oneCommitAttempt": true,
+    "receiptDeltaVerified": true,
+    "readAfterWriteVerified": true,
+    "confirmationPresent": true
+  },
+  "plannerCallsAllowed": false
+}

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+  "lineageId": "lineage.member.update_information.4043a9b51e233b7e",
+  "capabilityId": "member.update_information",
+  "capabilityVersion": "2.0.0",
+  "stage": "approved",
+  "discovery": {
+    "runId": "discovery.671c6565-12a1-4b5f-98a0-8a58a47db16d",
+    "provider": "anthropic-messages",
+    "model": "claude-sonnet-5",
+    "mode": "model",
+    "traceDigest": "035c61194d56ea4de4b448607979aaef24b99978f5eeef0dd42a22d18c363ad2"
+  },
+  "draftDigest": "890f50dbbb395508f0515137120d1527411d05b37af7bdf90a91b81808fb69ce",
+  "reviewedDigest": "66e6d4664d3215e8ee81946a814a0f431c4eb94ed98f4ee00e2c2e6a9af3c07c",
+  "approvedDigest": "dbe5cf33470607702824d89dcabea262a7649d72f7b7fb63c248404393d403e7",
+  "events": [
+    {
+      "type": "draft_created",
+      "at": "2026-08-21T06:01:05.217Z",
+      "actor": "discovery_compiler",
+      "artifactDigest": "890f50dbbb395508f0515137120d1527411d05b37af7bdf90a91b81808fb69ce",
+      "traceDigest": "035c61194d56ea4de4b448607979aaef24b99978f5eeef0dd42a22d18c363ad2"
+    },
+    {
+      "type": "reviewed",
+      "at": "2026-08-21T06:29:30.052Z",
+      "actor": "adaptation-review",
+      "artifactDigest": "66e6d4664d3215e8ee81946a814a0f431c4eb94ed98f4ee00e2c2e6a9af3c07c",
+      "parentArtifactDigest": "890f50dbbb395508f0515137120d1527411d05b37af7bdf90a91b81808fb69ce",
+      "reviewDiffDigest": "85dbde2512fcb93119505f4e8a5fabeeb6f64254ff04f1dd67ee92eb48f91567",
+      "changedPathCount": 151
+    },
+    {
+      "type": "canary_passed",
+      "at": "2026-08-21T06:29:40.343Z",
+      "actor": "canary_runner",
+      "artifactDigest": "66e6d4664d3215e8ee81946a814a0f431c4eb94ed98f4ee00e2c2e6a9af3c07c",
+      "canaryRunId": "canary.145f1d31-ef56-4e8e-a279-a431601cfb6e",
+      "evidenceDigest": "5bc5169ad85ba27bdb20e42733893496c17cf4daa3fb325761cadaf4e5628f8f"
+    },
+    {
+      "type": "approved",
+      "at": "2026-08-21T06:29:46.519Z",
+      "actor": "adaptation-approval",
+      "artifactDigest": "dbe5cf33470607702824d89dcabea262a7649d72f7b7fb63c248404393d403e7",
+      "parentArtifactDigest": "66e6d4664d3215e8ee81946a814a0f431c4eb94ed98f4ee00e2c2e6a9af3c07c"
+    }
+  ]
+}

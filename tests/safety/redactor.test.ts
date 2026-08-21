@@ -69,4 +69,21 @@ describe("Redactor", () => {
     expect(output.toLocaleLowerCase("en-US")).not.toContain("mixedcasesecret");
     expect(output.match(/\[REDACTED\]/gu)).toHaveLength(3);
   });
+
+  it("masks exact low-entropy outputs without corrupting structural names", () => {
+    const redactor = new Redactor().registerExact("OPEN");
+    expect(redactor.redactString("OPEN")).toBe("[REDACTED]");
+    expect(redactor.redactString("open")).toBe("[REDACTED]");
+    expect(redactor.redact({
+      scenario: "share-open-success",
+      capabilityId: "share.open",
+      opening_balance: "5.00",
+      status: "OPEN",
+    })).toEqual({
+      scenario: "share-open-success",
+      capabilityId: "share.open",
+      opening_balance: "5.00",
+      status: "[REDACTED]",
+    });
+  });
 });

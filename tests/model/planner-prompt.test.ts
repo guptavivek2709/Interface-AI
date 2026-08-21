@@ -39,6 +39,19 @@ describe("plannerPrompt", () => {
             disabled: false,
           },
         ],
+        semanticTargets: [
+          {
+            ref: "semantic-1",
+            framePath: [],
+            kind: "table_row_control",
+            name: `Select ${canaryMember}`,
+            headers: ["Member", "Action"],
+            keyColumn: "Member",
+            keyInputName: "memberId",
+            controlRole: "link",
+            controlName: "Select",
+          },
+        ],
         frames: [
           {
             framePath: [{ title: canaryMember, url: "http://example.test" }],
@@ -65,5 +78,7 @@ describe("plannerPrompt", () => {
     expect(prompt).toContain('"name":"enabled","type":"boolean"');
     expect(prompt).toContain('"name":"count","type":"number"');
     expect(prompt).toContain("values withheld");
+    expect(prompt).toContain("SEMANTIC TARGETS");
+    expect(prompt).toContain('"keyInputName":"memberId"');
   });
 });

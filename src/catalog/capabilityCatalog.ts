@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { CapabilityArtifactV2Schema, type CapabilityArtifactV2 } from "../domain/index.js";
 import {
-  CapabilityArtifactSchema,
-  CapabilityArtifactV2Schema,
-  type CapabilityArtifact,
-  type CapabilityArtifactV2,
-} from "../domain/index.js";
+  ArtifactLineageV2Schema,
+  type ArtifactLineageV2,
+} from "../discovery/artifactPromotionV2.js";
 
-export type CatalogArtifact = CapabilityArtifact | CapabilityArtifactV2;
+export type CatalogArtifact = CapabilityArtifactV2;
 export type CatalogSchemaVersion = CatalogArtifact["schemaVersion"];
 export type CatalogApproval = CatalogArtifact["capability"]["approval"];
 export type CatalogRisk = CapabilityArtifactV2["capability"]["risk"];
@@ -21,12 +20,8 @@ export type DeepReadonly<T> = T extends (...args: never[]) => unknown
       ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
       : T;
 
-export type CatalogInputMetadata = DeepReadonly<
-  CapabilityArtifact["inputs"][number] | CapabilityArtifactV2["inputs"][number]
->;
-export type CatalogOutputMetadata = DeepReadonly<
-  CapabilityArtifact["outputs"][number] | CapabilityArtifactV2["outputs"][number]
->;
+export type CatalogInputMetadata = DeepReadonly<CapabilityArtifactV2["inputs"][number]>;
+export type CatalogOutputMetadata = DeepReadonly<CapabilityArtifactV2["outputs"][number]>;
 
 export interface CapabilityMetadata {
   readonly id: string;
@@ -37,10 +32,23 @@ export interface CapabilityMetadata {
   readonly schemaVersion: CatalogSchemaVersion;
   readonly approval: CatalogApproval;
   readonly risk: CatalogRisk;
+  /** Exact contract declaration for a same-session supervisor authorization handoff. */
+  readonly supportsSupervisorHandoff: boolean;
   readonly inputs: readonly CatalogInputMetadata[];
   readonly outputs: readonly CatalogOutputMetadata[];
   /** SHA-256 of the validated artifact's canonical JSON representation. */
   readonly digest: string;
+  readonly lineage?: {
+    readonly lineageId: string;
+    readonly discoveryRunId: string;
+    readonly provider: string;
+    readonly model: string;
+    readonly traceDigest: string;
+    readonly draftDigest: string;
+    readonly reviewedDigest: string;
+    readonly approvedDigest: string;
+    readonly canaryRunId: string;
+  };
 }
 
 export interface CapabilityCatalogEntry {
@@ -48,9 +56,18 @@ export interface CapabilityCatalogEntry {
   readonly artifact: DeepReadonly<CatalogArtifact>;
 }
 
+/** Exact validated artifact/lineage pairs loaded from the published catalog roots. */
+export interface CapabilityDiscoveryRecord extends CapabilityCatalogEntry {
+  readonly lineage: DeepReadonly<ArtifactLineageV2>;
+}
+
 export interface CapabilityCatalogOptions {
   /** Trusted startup configuration. Catalog lookup never accepts filesystem paths. */
   directories: readonly string[];
+  /** Separate trusted roots containing approved external discovery lineage records. */
+  lineageDirectories?: readonly string[];
+  /** Require every approved, discovery-authored V2 artifact to have validated lineage. */
+  requireDiscoveryLineage?: boolean;
 }
 
 export interface CatalogQueryOptions {
@@ -61,7 +78,10 @@ export interface CatalogQueryOptions {
 export type CapabilityCatalogErrorCode =
   | "DIRECTORY_INVALID"
   | "ARTIFACT_INVALID"
-  | "DUPLICATE_CAPABILITY";
+  | "DUPLICATE_CAPABILITY"
+  | "LINEAGE_INVALID"
+  | "LINEAGE_MISSING"
+  | "DUPLICATE_LINEAGE";
 
 export class CapabilityCatalogError extends Error {
   readonly code: CapabilityCatalogErrorCode;
@@ -79,6 +99,12 @@ interface DiscoveredFile {
 }
 
 interface LoadedEntry extends CapabilityCatalogEntry {
+  readonly sourceLabel: string;
+  readonly lineage?: DeepReadonly<ArtifactLineageV2>;
+}
+
+interface LoadedLineage {
+  readonly lineage: DeepReadonly<ArtifactLineageV2>;
   readonly sourceLabel: string;
 }
 
@@ -112,8 +138,32 @@ export function canonicalJson(value: unknown): string {
   throw new TypeError(`Canonical JSON cannot encode ${typeof value}`);
 }
 
-export function canonicalArtifactDigest(artifact: CatalogArtifact): string {
+export function canonicalArtifactDigest(artifact: DeepReadonly<CatalogArtifact>): string {
   return createHash("sha256").update(canonicalJson(artifact), "utf8").digest("hex");
+}
+
+function supportsSupervisorHandoff(artifact: DeepReadonly<CatalogArtifact>): boolean {
+  if (artifact.capability.risk !== "supervisor_only") return false;
+  const hasSupervisorApprovalGate = artifact.steps.some(
+    (step) =>
+      step.approval?.kind === "supervisor_confirmation" &&
+      (step.effect === "reversible_write" || step.effect === "irreversible_commit"),
+  );
+  if (!hasSupervisorApprovalGate) return false;
+  return artifact.runtimeStates.some(
+    (state) =>
+      state.category === "intervention" &&
+      state.condition.kind === "http_status" &&
+      state.condition.status === 403 &&
+      state.effectCertainty === "not_applied" &&
+      state.requiredRole === "supervisor" &&
+      state.handoff?.kind === "same_session" &&
+      state.handoff.action === "authenticate_supervisor" &&
+      state.handoff.resume.kind === "restart_run" &&
+      state.handoff.trigger?.kind === "capability_role" &&
+      state.handoff.trigger.role === "supervisor" &&
+      state.handoff.revalidate.length > 0,
+  );
 }
 
 function parseArtifact(value: unknown, sourceLabel: string): CatalogArtifact {
@@ -124,29 +174,28 @@ function parseArtifact(value: unknown, sourceLabel: string): CatalogArtifact {
     );
   }
   const schemaVersion = (value as { schemaVersion?: unknown }).schemaVersion;
+  if (schemaVersion !== "2.0") {
+    throw new CapabilityCatalogError(
+      "ARTIFACT_INVALID",
+      `${sourceLabel} has unsupported capability schema version ${JSON.stringify(schemaVersion)}.`,
+    );
+  }
   try {
-    if (schemaVersion === "1.0") return CapabilityArtifactSchema.parse(value);
-    if (schemaVersion === "2.0") return CapabilityArtifactV2Schema.parse(value);
+    return CapabilityArtifactV2Schema.parse(value);
   } catch (error) {
     throw new CapabilityCatalogError(
       "ARTIFACT_INVALID",
-      `${sourceLabel} failed ${String(schemaVersion)} capability artifact validation.`,
+      `${sourceLabel} failed 2.0 capability artifact validation.`,
       { cause: error },
     );
   }
-  throw new CapabilityCatalogError(
-    "ARTIFACT_INVALID",
-    `${sourceLabel} has unsupported capability schema version ${JSON.stringify(schemaVersion)}.`,
-  );
 }
 
-function deriveV1Risk(artifact: CapabilityArtifact): CatalogRisk {
-  if (artifact.steps.some((step) => step.risk === "irreversible")) return "irreversible";
-  if (artifact.steps.some((step) => step.risk === "reversible")) return "write";
-  return "read";
-}
-
-function metadataFor(artifact: CatalogArtifact): CapabilityMetadata {
+function metadataFor(
+  artifact: DeepReadonly<CatalogArtifact>,
+  lineage?: DeepReadonly<ArtifactLineageV2>,
+): CapabilityMetadata {
+  const canary = lineage?.events.find((event) => event.type === "canary_passed");
   return deepFreeze({
     id: artifact.capability.id,
     name: artifact.capability.name,
@@ -155,10 +204,26 @@ function metadataFor(artifact: CatalogArtifact): CapabilityMetadata {
     version: artifact.capability.version,
     schemaVersion: artifact.schemaVersion,
     approval: artifact.capability.approval,
-    risk: artifact.schemaVersion === "2.0" ? artifact.capability.risk : deriveV1Risk(artifact),
+    risk: artifact.capability.risk,
+    supportsSupervisorHandoff: supportsSupervisorHandoff(artifact),
     inputs: artifact.inputs,
     outputs: artifact.outputs,
     digest: canonicalArtifactDigest(artifact),
+    ...(lineage && canary?.type === "canary_passed"
+      ? {
+          lineage: {
+            lineageId: lineage.lineageId,
+            discoveryRunId: lineage.discovery.runId,
+            provider: lineage.discovery.provider,
+            model: lineage.discovery.model,
+            traceDigest: lineage.discovery.traceDigest,
+            draftDigest: lineage.draftDigest,
+            reviewedDigest: lineage.reviewedDigest!,
+            approvedDigest: lineage.approvedDigest!,
+            canaryRunId: canary.canaryRunId,
+          },
+        }
+      : {}),
   });
 }
 
@@ -176,7 +241,11 @@ function visible(entry: CapabilityCatalogEntry, options: CatalogQueryOptions): b
   return options.visibility === "all" || entry.metadata.approval === "approved";
 }
 
-async function discoverJsonFiles(configuredDirectory: string, rootIndex: number): Promise<DiscoveredFile[]> {
+async function discoverJsonFiles(
+  configuredDirectory: string,
+  rootIndex: number,
+  kind: "capability" | "lineage" = "capability",
+): Promise<DiscoveredFile[]> {
   const configured = path.resolve(configuredDirectory);
   let configuredStat;
   try {
@@ -184,14 +253,14 @@ async function discoverJsonFiles(configuredDirectory: string, rootIndex: number)
   } catch (error) {
     throw new CapabilityCatalogError(
       "DIRECTORY_INVALID",
-      `Configured capability directory ${rootIndex + 1} does not exist or cannot be read.`,
+      `Configured ${kind} directory ${rootIndex + 1} does not exist or cannot be read.`,
       { cause: error },
     );
   }
   if (configuredStat.isSymbolicLink() || !configuredStat.isDirectory()) {
     throw new CapabilityCatalogError(
       "DIRECTORY_INVALID",
-      `Configured capability directory ${rootIndex + 1} must be a real directory, not a file or symbolic link.`,
+      `Configured ${kind} directory ${rootIndex + 1} must be a real directory, not a file or symbolic link.`,
     );
   }
 
@@ -206,13 +275,13 @@ async function discoverJsonFiles(configuredDirectory: string, rootIndex: number)
       if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
         throw new CapabilityCatalogError(
           "DIRECTORY_INVALID",
-          `Capability directory ${rootIndex + 1} contained a path outside its configured root.`,
+          `${kind === "capability" ? "Capability" : "Lineage"} directory ${rootIndex + 1} contained a path outside its configured root.`,
         );
       }
       if (entry.isSymbolicLink()) {
         throw new CapabilityCatalogError(
           "DIRECTORY_INVALID",
-          `Capability directory ${rootIndex + 1} contains forbidden symbolic link ${JSON.stringify(relative)}.`,
+          `${kind === "capability" ? "Capability" : "Lineage"} directory ${rootIndex + 1} contains forbidden symbolic link ${JSON.stringify(relative)}.`,
         );
       }
       if (entry.isDirectory()) {
@@ -220,7 +289,7 @@ async function discoverJsonFiles(configuredDirectory: string, rootIndex: number)
       } else if (entry.isFile() && path.extname(entry.name).toLocaleLowerCase("en-US") === ".json") {
         files.push({
           absolutePath: candidate,
-          sourceLabel: `capability directory ${rootIndex + 1}/${relative.split(path.sep).join("/")}`,
+          sourceLabel: `${kind} directory ${rootIndex + 1}/${relative.split(path.sep).join("/")}`,
         });
       }
     }
@@ -243,20 +312,79 @@ async function loadEntry(file: DiscoveredFile): Promise<LoadedEntry> {
   const artifact = deepFreeze(parseArtifact(parsed, file.sourceLabel));
   return deepFreeze({
     artifact,
-    metadata: metadataFor(artifact as CatalogArtifact),
+    metadata: metadataFor(artifact),
     sourceLabel: file.sourceLabel,
+  });
+}
+
+async function loadLineage(file: DiscoveredFile): Promise<LoadedLineage> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse((await readFile(file.absolutePath, "utf8")).replace(/^\uFEFF/u, "")) as unknown;
+  } catch (error) {
+    throw new CapabilityCatalogError(
+      "LINEAGE_INVALID",
+      `${file.sourceLabel} does not contain valid UTF-8 JSON.`,
+      { cause: error },
+    );
+  }
+  try {
+    return deepFreeze({
+      lineage: ArtifactLineageV2Schema.parse(parsed),
+      sourceLabel: file.sourceLabel,
+    });
+  } catch (error) {
+    throw new CapabilityCatalogError(
+      "LINEAGE_INVALID",
+      `${file.sourceLabel} failed artifact lineage validation.`,
+      { cause: error },
+    );
+  }
+}
+
+function bindApprovedLineage(entry: LoadedEntry, loaded: LoadedLineage): LoadedEntry {
+  const { artifact } = entry;
+  const { lineage } = loaded;
+  if (
+    artifact.capability.approval !== "approved" ||
+    artifact.provenance.source !== "discovery" ||
+    lineage.stage !== "approved" ||
+    lineage.discovery.mode !== "model" ||
+    lineage.capabilityId !== artifact.capability.id ||
+    lineage.capabilityVersion !== artifact.capability.version ||
+    lineage.approvedDigest !== canonicalArtifactDigest(artifact) ||
+    artifact.provenance.discoveryRunId !== lineage.discovery.runId ||
+    artifact.provenance.planner?.provider !== lineage.discovery.provider ||
+    artifact.provenance.planner.model !== lineage.discovery.model
+  ) {
+    throw new CapabilityCatalogError(
+      "LINEAGE_INVALID",
+      `${loaded.sourceLabel} does not bind the exact approved discovery artifact ${artifact.capability.id}@${artifact.capability.version}.`,
+    );
+  }
+  return deepFreeze({
+    artifact,
+    metadata: metadataFor(artifact, lineage),
+    lineage,
+    sourceLabel: entry.sourceLabel,
   });
 }
 
 export class CapabilityCatalog {
   readonly #entries: readonly LoadedEntry[];
   readonly #byKey: ReadonlyMap<string, LoadedEntry>;
+  readonly #discoveryRecords: readonly CapabilityDiscoveryRecord[];
 
   private constructor(entries: LoadedEntry[]) {
     entries.sort((left, right) => compareMetadata(left.metadata, right.metadata));
     this.#entries = Object.freeze([...entries]);
     this.#byKey = new Map(
       entries.map((entry) => [capabilityKey(entry.metadata.id, entry.metadata.version), entry]),
+    );
+    this.#discoveryRecords = Object.freeze(
+      entries.flatMap((entry) => entry.lineage
+        ? [deepFreeze({ metadata: entry.metadata, artifact: entry.artifact, lineage: entry.lineage })]
+        : []),
     );
   }
 
@@ -286,17 +414,67 @@ export class CapabilityCatalog {
       sourcesByKey.set(key, entry.sourceLabel);
       loaded.push(entry);
     }
-    return new CapabilityCatalog(loaded);
+
+    const lineageFiles: DiscoveredFile[] = [];
+    for (const [index, directory] of (options.lineageDirectories ?? []).entries()) {
+      lineageFiles.push(...(await discoverJsonFiles(directory, index, "lineage")));
+    }
+    const lineagesByKey = new Map<string, LoadedLineage>();
+    for (const file of lineageFiles) {
+      const candidate = await loadLineage(file);
+      const key = capabilityKey(candidate.lineage.capabilityId, candidate.lineage.capabilityVersion);
+      const existing = lineagesByKey.get(key);
+      if (existing) {
+        throw new CapabilityCatalogError(
+          "DUPLICATE_LINEAGE",
+          `Capability lineage ${candidate.lineage.capabilityId}@${candidate.lineage.capabilityVersion} is duplicated by ${existing.sourceLabel} and ${candidate.sourceLabel}.`,
+        );
+      }
+      lineagesByKey.set(key, candidate);
+    }
+
+    const requireDiscoveryLineage =
+      options.requireDiscoveryLineage ?? (options.lineageDirectories !== undefined);
+    const bound: LoadedEntry[] = [];
+    const consumedLineages = new Set<string>();
+    for (const entry of loaded) {
+      const key = capabilityKey(entry.metadata.id, entry.metadata.version);
+      const lineage = lineagesByKey.get(key);
+      if (lineage) {
+        bound.push(bindApprovedLineage(entry, lineage));
+        consumedLineages.add(key);
+      } else {
+        if (
+          requireDiscoveryLineage &&
+          entry.artifact.capability.approval === "approved" &&
+          entry.artifact.provenance.source === "discovery"
+        ) {
+          throw new CapabilityCatalogError(
+            "LINEAGE_MISSING",
+            `Approved discovery artifact ${entry.metadata.id}@${entry.metadata.version} has no approved lineage record.`,
+          );
+        }
+        bound.push(entry);
+      }
+    }
+    const orphan = [...lineagesByKey.entries()].find(([key]) => !consumedLineages.has(key));
+    if (orphan) {
+      throw new CapabilityCatalogError(
+        "LINEAGE_INVALID",
+        `${orphan[1].sourceLabel} has no exact approved artifact in the configured catalog.`,
+      );
+    }
+    return new CapabilityCatalog(bound);
   }
 
-  /** Build a catalog from reviewed, code-bundled artifacts without filesystem lookup. */
+  /** Build a catalog from reviewed V2 artifacts without filesystem lookup. */
   static fromArtifacts(values: readonly unknown[]): CapabilityCatalog {
     const loaded = values.map((value, index) => {
       const sourceLabel = `bundled capability ${index + 1}`;
       const artifact = deepFreeze(parseArtifact(structuredClone(value), sourceLabel));
       return deepFreeze({
         artifact,
-        metadata: metadataFor(artifact as CatalogArtifact),
+        metadata: metadataFor(artifact),
         sourceLabel,
       });
     });
@@ -338,5 +516,10 @@ export class CapabilityCatalog {
     const entry = this.#byKey.get(capabilityKey(id, version));
     if (!entry || !visible(entry, options)) return undefined;
     return entry;
+  }
+
+  /** List only exact artifact/lineage pairs actually loaded from published records. */
+  listDiscoveryRecords(): readonly CapabilityDiscoveryRecord[] {
+    return this.#discoveryRecords;
   }
 }

@@ -1,0 +1,18 @@
+{
+  "scenario": "application-error",
+  "status": "verified",
+  "observation": {
+    "status": "failure",
+    "code": "APPLICATION_ERROR",
+    "capabilityId": "member.get_record_and_balances",
+    "incidentCodes": [
+      "APPLICATION_ERROR"
+    ]
+  },
+  "assertion": {
+    "injectedFault": true,
+    "preWriteFailure": true,
+    "effectUncertain": false
+  },
+  "plannerCallsAllowed": false
+}

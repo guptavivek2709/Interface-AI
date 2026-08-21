@@ -1,4 +1,4 @@
-import type { CapabilityField, FieldType, JsonValue } from "./types";
+import type { CapabilityField, FieldType, JsonValue } from "./types.js";
 
 const PROTECTED_KEY =
   /(?:^|[_\-.])(password|passcode|passwd|pwd|pin|otp|credential|secret|authorization|csrf|private[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|session[_-]?token)(?:$|[_\-.])/iu;

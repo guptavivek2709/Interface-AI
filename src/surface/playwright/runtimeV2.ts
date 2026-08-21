@@ -138,6 +138,12 @@ export class PlaywrightReplayRuntimeV2 implements ReplayRuntimeV2 {
           ? await resolved.locator.inputValue()
           : await resolved.locator.innerText().catch(async () => resolved.locator.inputValue());
         value = normalize(raw);
+        if (action.transform?.kind === "strip_exact_suffix") {
+          if (!value.endsWith(action.transform.suffix)) {
+            throw new Error(`Extracted value is missing its reviewed suffix`);
+          }
+          value = value.slice(0, -action.transform.suffix.length).trim();
+        }
         if (action.outputName) context.bindings[`output:${action.outputName}`] = value;
         if (action.bindingName) context.bindings[action.bindingName] = value;
         break;
@@ -303,19 +309,23 @@ export class PlaywrightReplayRuntimeV2 implements ReplayRuntimeV2 {
     const target = this.getTarget(targetId);
     const root = await this.#frameRoot(target);
     const attempts: RuntimeResolutionAttemptV2[] = [];
+    let ambiguous = false;
     for (const strategy of target.strategies) {
       const candidates = await this.#locators(root, strategy, context);
       const count = candidates.length;
       attempts.push({ strategy: strategy.kind, count, summary: `${strategy.kind} resolved ${count}` });
       if (count === 1) return { target, locator: candidates[0]!, strategy, attempts };
       if (count > 1) {
-        throw new TargetResolutionV2Error(
-          "TARGET_AMBIGUOUS",
-          targetId,
-          `Strategy ${strategy.kind} for ${targetId} matched ${count} targets`,
-          attempts,
-        );
+        ambiguous = true;
       }
+    }
+    if (ambiguous) {
+      throw new TargetResolutionV2Error(
+        "TARGET_AMBIGUOUS",
+        targetId,
+        `No reviewed fallback strategy resolved exactly one target for ${targetId}`,
+        attempts,
+      );
     }
     throw new TargetResolutionV2Error(
       "TARGET_NOT_FOUND",
@@ -365,14 +375,30 @@ export class PlaywrightReplayRuntimeV2 implements ReplayRuntimeV2 {
     if (strategy.kind === "text") {
       return this.#visibleOrPresent(root.getByText(strategy.text, { exact: strategy.exact }));
     }
-    if (strategy.kind === "label_value") {
+    if (strategy.kind === "navigation_link") {
+      const candidates = root.getByRole("link", { name: strategy.name, exact: strategy.exact });
+      const matches: Locator[] = [];
+      for (let index = 0; index < await candidates.count(); index += 1) {
+        const candidate = candidates.nth(index);
+        const inNavigation = await candidate.evaluate((element, companionText) => {
+          const container = element.closest("nav, [role='navigation'], tr");
+          return Boolean(container?.textContent?.replace(/\s+/gu, " ").trim().includes(companionText));
+        }, strategy.companionText);
+        if (inNavigation) matches.push(candidate);
+      }
+      return matches;
+    }
+    if (strategy.kind === "label_value" || strategy.kind === "label_value_expr") {
+      const expectedLabel = strategy.kind === "label_value"
+        ? strategy.label
+        : `${strategy.prefix}${scalarText(this.resolveValue(strategy.label, context))}${strategy.suffix}`;
       const matches: Locator[] = [];
       const rows = root.locator("tr");
       for (let rowIndex = 0; rowIndex < await rows.count(); rowIndex += 1) {
         const cells = rows.nth(rowIndex).locator(":scope > th, :scope > td");
         const texts = (await cells.allInnerTexts()).map(normalize);
         for (let cellIndex = 0; cellIndex < texts.length; cellIndex += 1) {
-          if (texts[cellIndex] === strategy.label) {
+          if (texts[cellIndex] === expectedLabel) {
             const valueIndex = cellIndex + strategy.valueCellOffset;
             if (valueIndex < texts.length) matches.push(cells.nth(valueIndex));
           }
@@ -388,9 +414,9 @@ export class PlaywrightReplayRuntimeV2 implements ReplayRuntimeV2 {
     if (strategy.kind === "table") return tables;
 
     const expectedKey = scalarText(this.resolveValue(strategy.key, context));
-    const controls: Locator[] = [];
+    const resolvedRows: Locator[] = [];
     for (const table of tables) {
-        const headerMap = await this.#headerMap(table, strategy.headers);
+      const headerMap = await this.#headerMap(table, strategy.headers);
       const keyIndex = headerMap.get(strategy.keyColumn);
       if (keyIndex === undefined) continue;
       const rows = table.locator("tr");
@@ -399,16 +425,21 @@ export class PlaywrightReplayRuntimeV2 implements ReplayRuntimeV2 {
         const cells = row.locator(":scope > th, :scope > td");
         if (keyIndex >= await cells.count()) continue;
         if (normalize(await cells.nth(keyIndex).innerText()) !== expectedKey) continue;
+        if (strategy.kind === "table_row_value") {
+          const valueIndex = headerMap.get(strategy.valueColumn);
+          if (valueIndex !== undefined && valueIndex < await cells.count()) resolvedRows.push(cells.nth(valueIndex));
+          continue;
+        }
         const candidate = row.getByRole(strategy.controlRole as never, {
           name: strategy.controlName,
           exact: true,
         });
         for (let controlIndex = 0; controlIndex < await candidate.count(); controlIndex += 1) {
-          controls.push(candidate.nth(controlIndex));
+          resolvedRows.push(candidate.nth(controlIndex));
         }
       }
     }
-    return controls;
+    return resolvedRows;
   }
 
   async #visibleOrPresent(locator: Locator): Promise<Locator[]> {

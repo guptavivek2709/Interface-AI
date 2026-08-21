@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "runId": "member-update-success-7ca12119-ee78-425c-93bd-f965a94af8ed",
+  "createdAt": "2026-08-21T07:26:56.451Z",
+  "metadata": {
+    "evidenceVersion": "v2",
+    "mode": "hosted-meridian-scenario",
+    "scenario": "member-update-success",
+    "status": "verified",
+    "artifactDigests": [
+      "c6fe2e78f20ac99385f8e6dba051ce17c39b40ac45b3d20933df26c4ef4fc47a",
+      "dbe5cf33470607702824d89dcabea262a7649d72f7b7fb63c248404393d403e7"
+    ],
+    "targetProfileDigest": "eab9d160d7b767431005e20eb6cdffd3667f023e67a520de125c9362513674cb",
+    "plannerCallsAllowed": false,
+    "target": "hosted_meridian"
+  },
+  "evidence": [
+    {
+      "id": "e6cf9486-1809-43d1-a26f-51afc190f5eb",
+      "kind": "screenshot",
+      "path": "screenshots/completion.png",
+      "mimeType": "image/png",
+      "sha256": "dfc04cd50d70997f2c3da83a6c1af9168fa0b895bc783d22d5fa1b6d17017aa1",
+      "bytes": 13751,
+      "createdAt": "2026-08-21T07:26:48.788Z",
+      "masked": true
+    },
+    {
+      "id": "e23fea1b-2770-4323-a3e5-d4927aee7853",
+      "kind": "dom",
+      "path": "dom/completion.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "0f74ebb3400fee43af981217c846228df53b36c6f02a3ce4421385e7ccb3af1f",
+      "bytes": 2566,
+      "createdAt": "2026-08-21T07:26:48.817Z",
+      "redacted": true
+    },
+    {
+      "id": "35f7a330-9894-4c43-aa96-7691336c24df",
+      "kind": "screenshot",
+      "path": "screenshots/completion-2.png",
+      "mimeType": "image/png",
+      "sha256": "fcbb2e816e20149b3ed8e8da751c11ef6cbdbc3c7158e326b67090183f80db19",
+      "bytes": 18029,
+      "createdAt": "2026-08-21T07:26:51.223Z",
+      "masked": true
+    },
+    {
+      "id": "03d5d06c-0480-4eff-abe0-5ea4965fcedf",
+      "kind": "dom",
+      "path": "dom/completion-2.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "a5ee720d0767f8145b939b583f5b6b6522969cd484b2e28e74048fc6d8a3e807",
+      "bytes": 2874,
+      "createdAt": "2026-08-21T07:26:51.234Z",
+      "redacted": true
+    },
+    {
+      "id": "11c2c657-6251-4f88-9982-3bf5722d01ef",
+      "kind": "screenshot",
+      "path": "screenshots/approval-save_update.png",
+      "mimeType": "image/png",
+      "sha256": "d7f0b19b8eaaee8d8c10d4773d3af4be63fedcef09f0c1a65212f06050970260",
+      "bytes": 14493,
+      "createdAt": "2026-08-21T07:26:52.870Z",
+      "masked": true
+    },
+    {
+      "id": "41ae4ca1-7691-418a-b08f-a275368e79ed",
+      "kind": "dom",
+      "path": "dom/approval-save_update.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "b591ab2965b952d8a1649ad21f427a0cc09d7012fc6a5ece7988a0257ca4fb4b",
+      "bytes": 2491,
+      "createdAt": "2026-08-21T07:26:52.893Z",
+      "redacted": true
+    },
+    {
+      "id": "897f5aae-4d0a-44b5-beee-2554118772e7",
+      "kind": "screenshot",
+      "path": "screenshots/completion-3.png",
+      "mimeType": "image/png",
+      "sha256": "fcbb2e816e20149b3ed8e8da751c11ef6cbdbc3c7158e326b67090183f80db19",
+      "bytes": 18029,
+      "createdAt": "2026-08-21T07:26:53.823Z",
+      "masked": true
+    },
+    {
+      "id": "db2f0f6d-9b57-4254-9b9c-88231f029954",
+      "kind": "dom",
+      "path": "dom/completion-3.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "a5ee720d0767f8145b939b583f5b6b6522969cd484b2e28e74048fc6d8a3e807",
+      "bytes": 2874,
+      "createdAt": "2026-08-21T07:26:53.832Z",
+      "redacted": true
+    },
+    {
+      "id": "901bcedc-d607-43d3-8f00-a54b3b31699f",
+      "kind": "screenshot",
+      "path": "screenshots/completion-4.png",
+      "mimeType": "image/png",
+      "sha256": "fcbb2e816e20149b3ed8e8da751c11ef6cbdbc3c7158e326b67090183f80db19",
+      "bytes": 18029,
+      "createdAt": "2026-08-21T07:26:56.374Z",
+      "masked": true
+    },
+    {
+      "id": "2b502139-b7f2-4e08-84ec-ccc72d54fee9",
+      "kind": "dom",
+      "path": "dom/completion-4.html",
+      "mimeType": "text/html; charset=utf-8",
+      "sha256": "a5ee720d0767f8145b939b583f5b6b6522969cd484b2e28e74048fc6d8a3e807",
+      "bytes": 2874,
+      "createdAt": "2026-08-21T07:26:56.384Z",
+      "redacted": true
+    },
+    {
+      "id": "e4fc8b58-ef0c-4676-9d8d-b7afefdba41f",
+      "kind": "json",
+      "path": "data/scenario-summary.json",
+      "mimeType": "application/json",
+      "sha256": "e813e3b433736987385ab1bbe41b9d60ccf0078c9f32c0c6073155bed51bfec8",
+      "bytes": 540,
+      "createdAt": "2026-08-21T07:26:56.448Z",
+      "redacted": true
+    },
+    {
+      "id": "6b1b9553-03a9-4bff-a79b-559889d725ee",
+      "kind": "json",
+      "path": "events.jsonl",
+      "mimeType": "application/x-ndjson; charset=utf-8",
+      "sha256": "028b52c00d6b356caf4012519cd711c478ac7b59a3cc514e3492d50177cf162d",
+      "bytes": 56829,
+      "createdAt": "2026-08-21T07:26:56.451Z",
+      "redacted": true
+    }
+  ]
+}

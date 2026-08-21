@@ -16,7 +16,7 @@ export interface FrameScopeObservation {
 
 export interface ObservedControl {
   ref: string;
-  framePath: FrameScopeObservation[];
+  framePath: readonly FrameScopeObservation[];
   role: ControlRole;
   name: string;
   tag: string;
@@ -27,8 +27,51 @@ export interface ObservedControl {
   disabled: boolean;
 }
 
+interface ObservedSemanticTargetBase {
+  /** Observation-scoped reference. It is never persisted as a replay locator. */
+  ref: string;
+  framePath: readonly FrameScopeObservation[];
+  /** Privacy-safe display name used only by the planner and policy journal. */
+  name: string;
+}
+
+/**
+ * Durable page semantics that cannot be represented by a globally unique
+ * accessibility control. Values and row keys are deliberately excluded.
+ */
+export type ObservedSemanticTarget =
+  | (ObservedSemanticTargetBase & {
+      kind: "label_value";
+      label: string;
+      valueCellOffset: number;
+    })
+  | (ObservedSemanticTargetBase & {
+      kind: "table";
+      headers: string[];
+      nearText?: string;
+    })
+  | (ObservedSemanticTargetBase & {
+      kind: "table_row_value";
+      headers: string[];
+      keyColumn: string;
+      /** Invocation value is recovered from inputs at action/replay time. */
+      keyInputName: string;
+      valueColumn: string;
+    })
+  | (ObservedSemanticTargetBase & {
+      kind: "table_row_control";
+      headers: string[];
+      keyColumn: string;
+      /** Invocation value is recovered from inputs at action/replay time. */
+      keyInputName: string;
+      controlRole: ControlRole;
+      controlName: string;
+    });
+
+export type ObservedTarget = ObservedControl | ObservedSemanticTarget;
+
 export interface ObservedFrame {
-  framePath: FrameScopeObservation[];
+  framePath: readonly FrameScopeObservation[];
   url: string;
   title: string;
   headings: string[];
@@ -42,6 +85,7 @@ export interface SurfaceObservation {
   /** Latest HTTP status observed for the main frame's document response. */
   httpStatus: number | null;
   controls: ObservedControl[];
+  semanticTargets?: ObservedSemanticTarget[];
   frames: ObservedFrame[];
   visibleText: string;
   stateHash: string;
@@ -66,7 +110,7 @@ export interface EvidenceCapture {
  * planner or artifact compiler.
  */
 export interface DiscoverySurface extends HandoffSurface {
-  observe(): Promise<SurfaceObservation>;
+  observe(inputs?: Readonly<Record<string, string | number | boolean>>): Promise<SurfaceObservation>;
   actFromObservation(
     action: import("../model/planner.js").PlannerAction,
     observation: SurfaceObservation,

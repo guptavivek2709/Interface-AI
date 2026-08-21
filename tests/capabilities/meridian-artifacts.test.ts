@@ -37,7 +37,34 @@ describe("bundled MERIDIAN capabilities", () => {
     }
     const hold = meridianArtifacts.find((artifact) => artifact.capability.id === "account.place_hold")!;
     expect(hold.capability.risk).toBe("supervisor_only");
-    expect(hold.steps.at(-1)?.approval?.kind).toBe("supervisor_confirmation");
+    expect(hold.steps.find((step) => step.id === "commit_hold")?.approval?.kind).toBe("supervisor_confirmation");
+  });
+
+  it("derives supervisor handoff support only from the exact permission and approval gates", () => {
+    const hold = meridianArtifacts.find((artifact) => artifact.capability.id === "account.place_hold")!;
+    expect(CapabilityCatalog.fromArtifacts([hold]).list()[0]?.supportsSupervisorHandoff).toBe(true);
+
+    const withoutPermissionTrigger = structuredClone(hold);
+    const permission = withoutPermissionTrigger.runtimeStates.find(
+      (state) => state.handoff?.action === "authenticate_supervisor",
+    );
+    if (!permission?.handoff) throw new Error("Expected supervisor permission handoff");
+    delete permission.handoff.trigger;
+    expect(
+      CapabilityCatalog.fromArtifacts([withoutPermissionTrigger]).list()[0]?.supportsSupervisorHandoff,
+    ).toBe(false);
+
+    const withoutPermissionStatus = structuredClone(hold);
+    const nonPermission = withoutPermissionStatus.runtimeStates.find(
+      (state) => state.handoff?.action === "authenticate_supervisor",
+    );
+    if (!nonPermission || nonPermission.condition.kind !== "http_status") {
+      throw new Error("Expected supervisor HTTP permission rule");
+    }
+    nonPermission.condition.status = 401;
+    expect(
+      CapabilityCatalog.fromArtifacts([withoutPermissionStatus]).list()[0]?.supportsSupervisorHandoff,
+    ).toBe(false);
   });
 
   it("loads as an immutable approved catalog with stable digests", () => {
@@ -114,19 +141,107 @@ describe("bundled MERIDIAN capabilities", () => {
     ]));
   });
 
-  it("requires approval nonces and a proven positive marker for transfer success", () => {
+  it("requires opaque approval nonces and exact positive write receipts", () => {
     for (const artifact of meridianArtifacts) {
       for (const step of artifact.steps.filter((candidate) => candidate.approval)) {
         expect(step.approval?.stateNonceTarget).toBe("transaction_token");
         expect(artifact.targets.find((target) => target.id === step.approval?.stateNonceTarget)?.sensitive).toBe(true);
+        const tokenContract = step.preconditions.find((condition) =>
+          condition.kind === "all" && condition.conditions.some(
+            (child) => child.kind === "target_present" && child.targetId === "transaction_token",
+          ));
+        expect(tokenContract).toMatchObject({
+          kind: "all",
+          conditions: expect.arrayContaining([
+            { kind: "target_present", targetId: "transaction_token", present: true },
+          ]),
+        });
+        const tokenGuard = tokenContract?.kind === "all"
+          ? tokenContract.conditions.find(
+            (condition) => condition.kind === "target_value" && condition.targetId === "transaction_token",
+          )
+          : undefined;
+        expect(tokenGuard).toMatchObject({ operator: "matches", redactActual: true });
+        if (tokenGuard?.kind !== "target_value" || tokenGuard.value.kind !== "literal") {
+          throw new Error("Expected an authored opaque-token guard");
+        }
+        const pattern = new RegExp(String(tokenGuard.value.value), "u");
+        expect(pattern.test("opaque/K9x:Yz!2026")).toBe(true);
+        expect(pattern.test("")).toBe(false);
+        expect(pattern.test("opaque-token\n")).toBe(false);
+        expect(pattern.test("x".repeat(257))).toBe(false);
+        expect(artifact.outputs.some((output) => output.name.includes("token"))).toBe(false);
       }
     }
-    expect(meridianTransferArtifact.checkpoint).toMatchObject({
-      kind: "all",
-      conditions: expect.arrayContaining([
-        { kind: "page_title", title: "Transfer Posted - Meridian Core", exact: true },
-      ]),
+
+    const writes = [
+      {
+        artifact: meridianTransferArtifact,
+        title: "Transfer Posted - Meridian Core",
+        outputs: ["source_balance_before", "destination_balance_before", "confirmation", "posted_at", "amount", "source_balance", "destination_balance"],
+        receiptTargets: ["receipt_confirmation", "receipt_posted", "receipt_amount", "receipt_source_balance", "receipt_destination_balance"],
+      },
+      {
+        artifact: meridianOpenShareArtifact,
+        title: "Share Opened - Meridian Core",
+        outputs: ["shares_before", "confirmation", "new_share_id", "share_type", "opening_balance"],
+        receiptTargets: ["receipt_confirmation", "receipt_new_share_id", "receipt_share_type", "receipt_opening_balance"],
+      },
+      {
+        artifact: meridianArtifacts.find((artifact) => artifact.capability.id === "account.place_hold")!,
+        title: "Hold Applied - Meridian Core",
+        outputs: ["share_status_before", "confirmation", "share_status", "applied_at"],
+        receiptTargets: ["receipt_confirmation", "receipt_share_status", "receipt_applied"],
+      },
+    ];
+    for (const { artifact, title, outputs, receiptTargets } of writes) {
+      expect(artifact.outputs.map((output) => output.name)).toEqual(outputs);
+      expect(artifact.checkpoint).toMatchObject({
+        kind: "all",
+        conditions: expect.arrayContaining([
+          { kind: "page_title", title, exact: true },
+          ...receiptTargets.map((targetId) => ({ kind: "target_present", targetId, present: true })),
+        ]),
+      });
+      for (const output of outputs) {
+        expect(artifact.steps.filter(
+          (step) => (step.action.kind === "extract" || step.action.kind === "extract_table") && step.action.outputName === output,
+        )).toHaveLength(1);
+      }
+    }
+
+    expect(meridianTransferArtifact.targets.find((item) => item.id === "receipt_source_balance")?.strategies[0]).toEqual({
+      kind: "label_value_expr",
+      label: { kind: "input", name: "from_share" },
+      prefix: "",
+      suffix: ":",
+      valueCellOffset: 1,
     });
+    expect(meridianTransferArtifact.targets.find((item) => item.id === "receipt_destination_balance")?.strategies[0]).toEqual({
+      kind: "label_value_expr",
+      label: { kind: "input", name: "to_share" },
+      prefix: "",
+      suffix: ":",
+      valueCellOffset: 1,
+    });
+
+    const reconciliationMarkers = [
+      { artifact: meridianTransferArtifact, commit: "commit_transfer", outputs: ["source_balance_before", "destination_balance_before"] },
+      { artifact: meridianOpenShareArtifact, commit: "commit_new_share", outputs: ["shares_before"] },
+      { artifact: meridianUpdateMemberArtifact, commit: "save_update", outputs: ["email_before", "phone_before", "address_before"] },
+      { artifact: meridianArtifacts.find((artifact) => artifact.capability.id === "account.place_hold")!, commit: "commit_hold", outputs: ["share_status_before"] },
+    ];
+    for (const { artifact, commit, outputs } of reconciliationMarkers) {
+      const commitIndex = artifact.steps.findIndex((step) => step.id === commit);
+      expect(commitIndex).toBeGreaterThan(0);
+      for (const outputName of outputs) {
+        const markerIndex = artifact.steps.findIndex(
+          (step) => (step.action.kind === "extract" || step.action.kind === "extract_table") && step.action.outputName === outputName,
+        );
+        expect(markerIndex).toBeGreaterThanOrEqual(0);
+        expect(markerIndex).toBeLessThan(commitIndex);
+      }
+    }
   });
 
   it("rejects malformed type, table, approval, and restart semantics", () => {
@@ -181,11 +296,42 @@ describe("bundled MERIDIAN capabilities", () => {
       condition: { kind: "all" },
     });
     expect(statusState("SUPERVISOR_REQUIRED")).toMatchObject({
-      category: "escalation",
+      category: "intervention",
+      effectCertainty: "not_applied",
       requiredRole: "supervisor",
+      handoff: {
+        action: "authenticate_supervisor",
+        trigger: { kind: "capability_role", role: "supervisor" },
+      },
     });
-    expect(statusState("SESSION_EXPIRED").effectCertainty).toBeUndefined();
+    expect(statusState("SESSION_EXPIRED")).toMatchObject({
+      category: "intervention",
+      effectCertainty: "not_applied",
+      handoff: {
+        kind: "same_session",
+        action: "restore_session",
+        resume: { kind: "restart_run" },
+        revalidate: [{ kind: "route", pattern: "^/menu$" }],
+      },
+    });
     expect(statusState("MAINTENANCE").effectCertainty).toBeUndefined();
     expect(statusState("APPLICATION_ERROR").effectCertainty).toBeUndefined();
+  });
+
+  it("requires fail-closed same-session directives for intervention states", () => {
+    const missingHandoff = structuredClone(meridianTransferArtifact) as any;
+    const missingState = missingHandoff.runtimeStates.find((state: any) => state.code === "SESSION_EXPIRED");
+    delete missingState.handoff;
+    expect(CapabilityArtifactV2Schema.safeParse(missingHandoff).success).toBe(false);
+
+    const uncertain = structuredClone(meridianTransferArtifact) as any;
+    const uncertainState = uncertain.runtimeStates.find((state: any) => state.code === "SESSION_EXPIRED");
+    uncertainState.effectCertainty = "unknown";
+    expect(CapabilityArtifactV2Schema.safeParse(uncertain).success).toBe(false);
+
+    const undeclaredTarget = structuredClone(meridianTransferArtifact) as any;
+    const invalidState = undeclaredTarget.runtimeStates.find((state: any) => state.code === "SESSION_EXPIRED");
+    invalidState.handoff.revalidate = [{ kind: "target_present", targetId: "unreviewed_control", present: true }];
+    expect(CapabilityArtifactV2Schema.safeParse(undeclaredTarget).success).toBe(false);
   });
 });

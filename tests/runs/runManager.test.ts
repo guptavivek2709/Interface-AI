@@ -64,6 +64,32 @@ function approval(request: ManagedRunnerFactoryRequest, supervisor = false): Rep
   };
 }
 
+function handoff(request: ManagedRunnerFactoryRequest): Extract<ReplayProgressV2, { status: "awaiting_human" }> {
+  return {
+    status: "awaiting_human",
+    phase: "awaiting_human",
+    intervention: {
+      interventionId: "22222222-2222-4222-8222-222222222222",
+      runId: request.runId,
+      stepId: "open_member",
+      reasonCode: "SESSION_EXPIRED",
+      action: "restore_session",
+      state: "awaiting_human",
+      createdAt: "2099-01-01T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:02:00.000Z",
+      sameLiveSession: true,
+    },
+    journal: [],
+    incidents: [{
+      code: "SESSION_EXPIRED",
+      category: "intervention",
+      message: "Restore the retained session",
+      stepId: "open_member",
+      occurredAt: "2099-01-01T00:00:00.000Z",
+    }],
+  };
+}
+
 class FakeRunner implements ManagedReplayRunnerV2 {
   readonly initial = deferred<ReplayProgressV2>();
   readonly resumed = deferred<ReplayProgressV2>();
@@ -102,6 +128,60 @@ class BlockingCloseRunner extends FakeRunner {
   override async close(): Promise<void> {
     this.closeCount += 1;
     await this.closeGate.promise;
+  }
+}
+
+class HandoffRunner extends FakeRunner {
+  readonly humanResumed = deferred<ReplayProgressV2>();
+  progress!: Extract<ReplayProgressV2, { status: "awaiting_human" }>;
+  humanActors: Array<{ id: string; roles: readonly string[] }> = [];
+  actions: string[] = [];
+  humanResumeStarted = false;
+
+  async takeHumanControl(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    expect(interventionId).toBe(this.progress.intervention.interventionId);
+    this.humanActors.push(actor);
+    this.progress = {
+      ...this.progress,
+      intervention: { ...this.progress.intervention, state: "human_active" },
+    };
+    return this.progress;
+  }
+
+  async performHumanAction(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+    action: "restore_session",
+  ): Promise<ReplayProgressV2> {
+    expect(interventionId).toBe(this.progress.intervention.interventionId);
+    expect(actor.id).toBe(this.humanActors.at(-1)?.id);
+    this.actions.push(action);
+    this.progress = {
+      ...this.progress,
+      intervention: { ...this.progress.intervention, state: "action_completed" },
+    };
+    return this.progress;
+  }
+
+  resumeHuman(
+    interventionId: string,
+    actor: { id: string; roles: readonly string[] },
+  ): Promise<ReplayProgressV2> {
+    expect(interventionId).toBe(this.progress.intervention.interventionId);
+    expect(actor.id).toBe(this.humanActors.at(-1)?.id);
+    expect(this.progress.intervention.state).toBe("action_completed");
+    this.humanResumeStarted = true;
+    return this.humanResumed.promise;
+  }
+
+  override async close(): Promise<void> {
+    this.closeCount += 1;
+    if (this.runStarted) this.initial.reject(new Error("Fake runtime closed"));
+    if (this.resumeStarted) this.resumed.reject(new Error("Fake runtime closed"));
+    if (this.humanResumeStarted) this.humanResumed.reject(new Error("Fake runtime closed"));
   }
 }
 
@@ -315,6 +395,66 @@ describe("RunManager idempotency and events", () => {
 });
 
 describe("RunManager approval, cancellation, and cleanup", () => {
+  it("retains session ownership across human handoff while releasing the global execution slot", async () => {
+    const runners = new Map<string, FakeRunner>();
+    const requests = new Map<string, ManagedRunnerFactoryRequest>();
+    const manager = managerWithFactory((factoryRequest) => {
+      requests.set(factoryRequest.runId, factoryRequest);
+      const runner = factoryRequest.inputs.memberNumber === "handoff"
+        ? new HandoffRunner()
+        : new FakeRunner();
+      runners.set(factoryRequest.runId, runner);
+      return runner;
+    }, { maxConcurrentRuns: 1 });
+
+    const pausedRun = manager.submit(request("retained-session", "handoff"));
+    const sameSession = manager.submit(request("retained-session", "queued-same"));
+    const otherSession = manager.submit(request("other-session", "other"));
+    await eventually(() => expect(runners.has(pausedRun.runId)).toBe(true));
+    const handoffRunner = runners.get(pausedRun.runId) as HandoffRunner;
+    handoffRunner.progress = handoff(requests.get(pausedRun.runId)!);
+    handoffRunner.initial.resolve(handoffRunner.progress);
+
+    await eventually(() => expect(manager.get(pausedRun.runId)?.phase).toBe("awaiting_human"));
+    await eventually(() => expect(runners.has(otherSession.runId)).toBe(true));
+    expect(manager.get(sameSession.runId)?.phase).toBe("queued");
+    expect(manager.replayEvents(pausedRun.runId).at(-1)).toMatchObject({
+      type: "intervention.requested",
+      data: { action: "restore_session", sameLiveSession: true },
+    });
+
+    const interventionId = handoffRunner.progress.intervention.interventionId;
+    const actor = { source: "operator" as const, id: "operator-1", roles: ["teller"] };
+    await expect(
+      manager.takeHumanControl(pausedRun.runId, "33333333-3333-4333-8333-333333333333", actor),
+    ).rejects.toMatchObject({ code: "RUN_NOT_HANDOFFABLE" });
+    const claimed = await manager.takeHumanControl(pausedRun.runId, interventionId, actor);
+    expect(claimed).toMatchObject({
+      phase: "awaiting_human",
+      progress: { status: "awaiting_human", intervention: { state: "human_active" } },
+    });
+    await expect(manager.cancel(pausedRun.runId)).rejects.toMatchObject({ code: "RUN_NOT_CANCELLABLE" });
+    expect(() => manager.resumeHuman(pausedRun.runId, interventionId, actor)).toThrowError(
+      expect.objectContaining({ code: "RUN_NOT_HANDOFFABLE" }),
+    );
+    const acted = await manager.performHumanAction(pausedRun.runId, interventionId, actor, "restore_session");
+    expect(acted).toMatchObject({
+      phase: "awaiting_human",
+      progress: { status: "awaiting_human", intervention: { state: "action_completed" } },
+    });
+    expect(handoffRunner.actions).toEqual(["restore_session"]);
+    manager.resumeHuman(pausedRun.runId, interventionId, actor);
+
+    const otherRunner = runners.get(otherSession.runId)!;
+    otherRunner.initial.resolve(terminal(requests.get(otherSession.runId)!));
+    await eventually(() => expect(handoffRunner.humanResumeStarted).toBe(true));
+    expect(manager.get(sameSession.runId)?.phase).toBe("queued");
+    handoffRunner.humanResumed.resolve(terminal(requests.get(pausedRun.runId)!));
+    await eventually(() => expect(runners.has(sameSession.runId)).toBe(true));
+    runners.get(sameSession.runId)!.initial.resolve(terminal(requests.get(sameSession.runId)!));
+    await eventually(() => expect(manager.get(sameSession.runId)?.phase).toBe("completed"));
+  });
+
   it("delegates supervisor approval to the runner and never accepts model approval", async () => {
     const runners = new Map<string, FakeRunner>();
     const requests = new Map<string, ManagedRunnerFactoryRequest>();
